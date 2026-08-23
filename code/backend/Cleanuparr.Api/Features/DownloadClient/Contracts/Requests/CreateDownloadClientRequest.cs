@@ -23,6 +23,8 @@ public sealed record CreateDownloadClientRequest
 
     public string? Password { get; init; }
 
+    public string? ApiKey { get; init; }
+
     public string? UrlBase { get; init; }
 
     public string? ExternalUrl { get; init; }
@@ -57,6 +59,11 @@ public sealed record CreateDownloadClientRequest
         {
             throw new ValidationException("Password cannot be a placeholder value");
         }
+
+        if (ApiKey.IsPlaceholder())
+        {
+            throw new ValidationException("API key cannot be a placeholder value");
+        }
     }
 
     public DownloadClientConfig ToEntity() => new()
@@ -68,6 +75,7 @@ public sealed record CreateDownloadClientRequest
         Host = new Uri(Host!, UriKind.RelativeOrAbsolute),
         Username = Username,
         Password = Password,
+        ApiKey = ApiKey,
         UrlBase = UrlBase,
         ExternalUrl = !string.IsNullOrWhiteSpace(ExternalUrl) ? new Uri(ExternalUrl, UriKind.RelativeOrAbsolute) : null,
         DownloadDirectorySource = DownloadDirectorySource,

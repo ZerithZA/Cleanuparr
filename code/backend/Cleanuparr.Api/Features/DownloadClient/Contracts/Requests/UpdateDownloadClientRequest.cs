@@ -23,6 +23,8 @@ public sealed record UpdateDownloadClientRequest
 
     public string? Password { get; init; }
 
+    public string? ApiKey { get; init; }
+
     public string? UrlBase { get; init; }
 
     public string? ExternalUrl { get; init; }
@@ -63,6 +65,7 @@ public sealed record UpdateDownloadClientRequest
         Host = new Uri(Host!, UriKind.RelativeOrAbsolute),
         Username = Username,
         Password = Password.IsPlaceholder() ? existing.Password : Password,
+        ApiKey = ApiKey.IsPlaceholder() ? existing.ApiKey : ApiKey,
         UrlBase = UrlBase,
         ExternalUrl = !string.IsNullOrWhiteSpace(ExternalUrl) ? new Uri(ExternalUrl, UriKind.RelativeOrAbsolute) : null,
         DownloadDirectorySource = DownloadDirectorySource,

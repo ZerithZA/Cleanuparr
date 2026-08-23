@@ -148,8 +148,9 @@ public sealed class DownloadClientController : ControllerBase
             request.Validate();
 
             string? resolvedPassword = null;
+            string? resolvedApiKey = null;
 
-            if (request.Password.IsPlaceholder() && request.ClientId.HasValue)
+            if ((request.Password.IsPlaceholder() || request.ApiKey.IsPlaceholder()) && request.ClientId.HasValue)
             {
                 var existingClient = await _dataContext.DownloadClients
                     .AsNoTracking()
@@ -160,10 +161,18 @@ public sealed class DownloadClientController : ControllerBase
                     return this.ProblemResult(StatusCodes.Status404NotFound, $"Download client with ID {request.ClientId.Value} not found");
                 }
 
-                resolvedPassword = existingClient.Password;
+                if (request.Password.IsPlaceholder())
+                {
+                    resolvedPassword = existingClient.Password;
+                }
+
+                if (request.ApiKey.IsPlaceholder())
+                {
+                    resolvedApiKey = existingClient.ApiKey;
+                }
             }
 
-            var testConfig = request.ToTestConfig(resolvedPassword);
+            var testConfig = request.ToTestConfig(resolvedPassword, resolvedApiKey);
             using var downloadService = _downloadServiceFactory.GetDownloadService(testConfig);
             var healthResult = await downloadService.HealthCheckAsync();
 

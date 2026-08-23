@@ -5,6 +5,7 @@ using Cleanuparr.Infrastructure.Features.DownloadClient;
 using Cleanuparr.Infrastructure.Features.DownloadClient.Deluge;
 using Cleanuparr.Infrastructure.Features.DownloadClient.QBittorrent;
 using Cleanuparr.Infrastructure.Features.DownloadClient.RTorrent;
+using Cleanuparr.Infrastructure.Features.DownloadClient.Sabnzbd;
 using Cleanuparr.Infrastructure.Features.DownloadClient.Transmission;
 using Cleanuparr.Infrastructure.Features.DownloadClient.UTorrent;
 using Cleanuparr.Infrastructure.Features.Files;
@@ -52,6 +53,7 @@ public class DownloadServiceFactoryTests : IDisposable
         services.AddSingleton(Substitute.For<ILogger<DelugeService>>());
         services.AddSingleton(Substitute.For<ILogger<TransmissionService>>());
         services.AddSingleton(Substitute.For<ILogger<UTorrentService>>());
+        services.AddSingleton(Substitute.For<ILogger<SabnzbdService>>());
 
         services.AddSingleton(Substitute.For<IFilenameEvaluator>());
         services.AddSingleton(Substitute.For<IStriker>());
@@ -178,6 +180,20 @@ public class DownloadServiceFactoryTests : IDisposable
     }
 
     [Fact]
+    public void GetDownloadService_SABnzbd_ReturnsSabnzbdService()
+    {
+        // Arrange
+        var config = CreateClientConfig(DownloadClientTypeName.SABnzbd, DownloadClientType.Usenet);
+
+        // Act
+        var service = _factory.GetDownloadService(config);
+
+        // Assert
+        service.ShouldNotBeNull();
+        service.ShouldBeOfType<SabnzbdService>();
+    }
+
+    [Fact]
     public void GetDownloadService_UnsupportedType_ThrowsNotSupportedException()
     {
         // Arrange
@@ -248,11 +264,13 @@ public class DownloadServiceFactoryTests : IDisposable
     [InlineData(DownloadClientTypeName.Transmission, typeof(TransmissionService))]
     [InlineData(DownloadClientTypeName.uTorrent, typeof(UTorrentService))]
     [InlineData(DownloadClientTypeName.rTorrent, typeof(RTorrentService))]
+    [InlineData(DownloadClientTypeName.SABnzbd, typeof(SabnzbdService))]
     public void GetDownloadService_AllSupportedTypes_ReturnCorrectServiceType(
         DownloadClientTypeName typeName, Type expectedServiceType)
     {
         // Arrange
-        var config = CreateClientConfig(typeName);
+        var clientType = typeName == DownloadClientTypeName.SABnzbd ? DownloadClientType.Usenet : DownloadClientType.Torrent;
+        var config = CreateClientConfig(typeName, clientType);
 
         // Act
         var service = _factory.GetDownloadService(config);
@@ -280,14 +298,14 @@ public class DownloadServiceFactoryTests : IDisposable
 
     #region Helper Methods
 
-    private static DownloadClientConfig CreateClientConfig(DownloadClientTypeName typeName)
+    private static DownloadClientConfig CreateClientConfig(DownloadClientTypeName typeName, DownloadClientType clientType = DownloadClientType.Torrent)
     {
         return new DownloadClientConfig
         {
             Id = Guid.NewGuid(),
             Name = $"Test {typeName} Client",
             TypeName = typeName,
-            Type = DownloadClientType.Torrent,
+            Type = clientType,
             Host = new Uri("http://test.example.com"),
             Enabled = true
         };

@@ -7,4 +7,5 @@ public enum DownloadClientTypeName
     Transmission,
     uTorrent,
     rTorrent,
+    SABnzbd,
 }

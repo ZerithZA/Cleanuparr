@@ -23,12 +23,17 @@ const TYPE_OPTIONS: SelectOption[] = [
   { label: 'Transmission', value: DownloadClientTypeName.Transmission },
   { label: 'uTorrent', value: DownloadClientTypeName.uTorrent },
   { label: 'rTorrent', value: DownloadClientTypeName.rTorrent },
+  { label: 'SABnzbd', value: DownloadClientTypeName.SABnzbd },
 ];
 
 const AUTOFILL_URL_BASES: Partial<Record<DownloadClientTypeName, string>> = {
   [DownloadClientTypeName.Transmission]: 'transmission',
   [DownloadClientTypeName.rTorrent]: 'plugins/httprpc/action.php',
 };
+
+const USENET_CLIENT_TYPES: ReadonlySet<DownloadClientTypeName> = new Set([
+  DownloadClientTypeName.SABnzbd,
+]);
 
 interface DownloadClientFormModel {
   enabled: boolean;
@@ -37,6 +42,7 @@ interface DownloadClientFormModel {
   host: string;
   username: string;
   password: string;
+  apiKey: string;
   urlBase: string;
   externalUrl: string;
   downloadDirectorySource: string;
@@ -79,7 +85,7 @@ export class DownloadClientsComponent implements HasPendingChanges {
 
   readonly clientModel = signal<DownloadClientFormModel>({
     enabled: true, name: '', typeName: DownloadClientTypeName.qBittorrent,
-    host: '', username: '', password: '', urlBase: '', externalUrl: '',
+    host: '', username: '', password: '', apiKey: '', urlBase: '', externalUrl: '',
     downloadDirectorySource: '', downloadDirectoryTarget: '',
   });
   readonly clientForm = form(this.clientModel, (p) => {
@@ -89,11 +95,20 @@ export class DownloadClientsComponent implements HasPendingChanges {
 
   readonly hasModalErrors = computed(() => this.clientForm().invalid());
 
-  readonly showUsernameField = computed(() => {
-    return this.clientModel().typeName !== DownloadClientTypeName.Deluge;
+  readonly isSabnzbd = computed(() => {
+    return this.clientModel().typeName === DownloadClientTypeName.SABnzbd;
   });
 
-  readonly showPasswordField = computed(() => true);
+  readonly showUsernameField = computed(() => {
+    const typeName = this.clientModel().typeName;
+    return typeName !== DownloadClientTypeName.Deluge && typeName !== DownloadClientTypeName.SABnzbd;
+  });
+
+  readonly showPasswordField = computed(() => {
+    return this.clientModel().typeName !== DownloadClientTypeName.SABnzbd;
+  });
+
+  readonly showApiKeyField = computed(() => this.isSabnzbd());
 
   readonly usernameHint = computed(() => {
     if (this.clientModel().typeName === DownloadClientTypeName.rTorrent) {
@@ -108,6 +123,8 @@ export class DownloadClientsComponent implements HasPendingChanges {
     }
     return 'Password for authentication';
   });
+
+  readonly apiKeyHint = computed(() => 'SABnzbd API key, found in Config -> General -> API Key');
 
   readonly urlBaseHint = computed(() => {
     if (this.clientModel().typeName === DownloadClientTypeName.rTorrent) {
@@ -124,6 +141,14 @@ export class DownloadClientsComponent implements HasPendingChanges {
     const patch: Partial<DownloadClientFormModel> = {};
     if (newType === DownloadClientTypeName.Deluge && m.username !== '') {
       patch.username = '';
+    }
+    if (newType === DownloadClientTypeName.SABnzbd) {
+      if (m.username !== '') {
+        patch.username = '';
+      }
+      if (m.password !== '') {
+        patch.password = '';
+      }
     }
     const autofill = AUTOFILL_URL_BASES[newType];
     const replaceable = m.urlBase === '' || Object.values(AUTOFILL_URL_BASES).includes(m.urlBase);
@@ -159,7 +184,7 @@ export class DownloadClientsComponent implements HasPendingChanges {
     this.editingClient.set(null);
     this.clientModel.set({
       enabled: true, name: '', typeName: DownloadClientTypeName.qBittorrent,
-      host: '', username: '', password: '', urlBase: '', externalUrl: '',
+      host: '', username: '', password: '', apiKey: '', urlBase: '', externalUrl: '',
       downloadDirectorySource: '', downloadDirectoryTarget: '',
     });
     this.modalVisible.set(true);
@@ -174,6 +199,7 @@ export class DownloadClientsComponent implements HasPendingChanges {
       host: client.host,
       username: client.username,
       password: client.password ?? '',
+      apiKey: client.apiKey ?? '',
       urlBase: client.urlBase,
       externalUrl: client.externalUrl ?? '',
       downloadDirectorySource: client.downloadDirectorySource ?? '',
@@ -182,14 +208,19 @@ export class DownloadClientsComponent implements HasPendingChanges {
     this.modalVisible.set(true);
   }
 
+  private clientTypeFor(typeName: DownloadClientTypeName): DownloadClientType {
+    return USENET_CLIENT_TYPES.has(typeName) ? DownloadClientType.Usenet : DownloadClientType.Torrent;
+  }
+
   testConnection(): void {
     const m = this.clientModel();
     const request: TestDownloadClientRequest = {
       typeName: m.typeName,
-      type: DownloadClientType.Torrent,
+      type: this.clientTypeFor(m.typeName),
       host: m.host,
       username: m.username,
       password: m.password,
+      apiKey: m.apiKey,
       urlBase: m.urlBase,
       clientId: this.editingClient()?.id,
     };
@@ -223,6 +254,7 @@ export class DownloadClientsComponent implements HasPendingChanges {
         host: m.host,
         username: m.username,
         password: m.password || undefined,
+        apiKey: m.apiKey || undefined,
         urlBase: m.urlBase,
         externalUrl: m.externalUrl || undefined,
         downloadDirectorySource: m.downloadDirectorySource || null,
@@ -244,11 +276,12 @@ export class DownloadClientsComponent implements HasPendingChanges {
       const dto: CreateDownloadClientDto = {
         enabled: m.enabled,
         name: m.name,
-        type: DownloadClientType.Torrent,
+        type: this.clientTypeFor(m.typeName),
         typeName: m.typeName,
         host: m.host,
         username: m.username,
         password: m.password,
+        apiKey: m.apiKey,
         urlBase: m.urlBase,
         externalUrl: m.externalUrl || undefined,
         downloadDirectorySource: m.downloadDirectorySource || null,

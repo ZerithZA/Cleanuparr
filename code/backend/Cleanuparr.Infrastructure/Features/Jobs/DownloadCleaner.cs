@@ -108,6 +108,13 @@ public sealed class DownloadCleaner : GenericHandler
             {
                 await downloadService.LoginAsync();
                 loggedInServices.Add(downloadService);
+
+                // seeding-rules cleanup is torrent-specific; Usenet clients have no seeding concept
+                if (downloadService.ClientConfig.Type is not DownloadClientType.Torrent)
+                {
+                    continue;
+                }
+
                 List<ITorrentItemWrapper> clientDownloads = await downloadService.GetSeedingDownloads();
 
                 if (clientDownloads.Count > 0)
