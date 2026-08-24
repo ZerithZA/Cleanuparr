@@ -12,6 +12,7 @@ using Cleanuparr.Infrastructure.Helpers;
 using Cleanuparr.Infrastructure.Interceptors;
 using Cleanuparr.Persistence.Models.Configuration.Arr;
 using Cleanuparr.Persistence.Models.Configuration.QueueCleaner;
+using Cleanuparr.Shared.Helpers;
 using System.Text.Json;
 using Cleanuparr.Infrastructure.Json;
 using Microsoft.Extensions.Caching.Memory;
