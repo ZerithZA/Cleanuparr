@@ -120,8 +120,8 @@
           <app-input label="Ollama URL" placeholder="http://localhost:11434" [formField]="qcForm.aiImportOllamaUrl"
             hint="Base URL of the Ollama server to use for verification"
             helpKey="queue-cleaner:aiImport.ollamaUrl" />
-          <app-input label="Model" placeholder="llama3.2:3b" [formField]="qcForm.aiImportModel"
-            hint="Name of the Ollama model to use for verification"
+          <app-input label="Model" placeholder="llama3.1:8b" [formField]="qcForm.aiImportModel"
+            hint="Name of the Ollama model to use for verification. Smaller models (e.g. llama3.2:3b) have shown unreliable classification accuracy - llama3.1:8b or larger is recommended"
             helpKey="queue-cleaner:aiImport.model" />
           <app-input label="Target Message Prefix" [formField]="qcForm.aiImportTargetMessagePrefix"
             hint="Only queue items whose failure message starts with this prefix are considered for AI verification"

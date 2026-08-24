@@ -288,13 +288,13 @@ export class QueueCleanerComponent implements HasPendingChanges {
           aiImportOllamaUrl: config.aiImport.ollamaUrl ?? '',
           aiImportModel: config.aiImport.model ?? '',
           aiImportTargetMessagePrefix: config.aiImport.targetMessagePrefix ?? 'Found matching series via grab history',
-          aiImportConfidenceThreshold: config.aiImport.confidenceThreshold,
-          aiImportTimeoutSeconds: config.aiImport.timeoutSeconds,
-          aiImportTickBudgetSeconds: config.aiImport.tickBudgetSeconds,
-          aiImportBreakerFailureThreshold: config.aiImport.breakerFailureThreshold,
-          aiImportBreakerCooldownMinutes: config.aiImport.breakerCooldownMinutes,
-          aiImportSkipBudget: config.aiImport.skipBudget,
-          aiImportDecisionCacheTtlHours: config.aiImport.decisionCacheTtlHours,
+          aiImportConfidenceThreshold: config.aiImport.confidenceThreshold || 75,
+          aiImportTimeoutSeconds: config.aiImport.timeoutSeconds || 8,
+          aiImportTickBudgetSeconds: config.aiImport.tickBudgetSeconds || 30,
+          aiImportBreakerFailureThreshold: config.aiImport.breakerFailureThreshold || 5,
+          aiImportBreakerCooldownMinutes: config.aiImport.breakerCooldownMinutes || 15,
+          aiImportSkipBudget: config.aiImport.skipBudget ?? 3,
+          aiImportDecisionCacheTtlHours: config.aiImport.decisionCacheTtlHours || 24,
         });
         this.savedSnapshot.set(this.buildSnapshot());
       });
