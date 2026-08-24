@@ -123,6 +123,25 @@ public sealed class QueueCleanerConfigTests
 
     #endregion
 
+    #region Validate - AiImport Validation
+
+    [Fact]
+    public void Validate_WithInvalidAiImportConfig_ThrowsValidationException()
+    {
+        var config = new QueueCleanerConfig
+        {
+            AiImport = new AiImportConfig
+            {
+                ConfidenceThreshold = 10 // Invalid - must be 50-100
+            }
+        };
+
+        var exception = Should.Throw<ValidationException>(() => config.Validate());
+        exception.Message.ShouldBe("AI import confidence threshold must be between 50 and 100");
+    }
+
+    #endregion
+
     #region Validate - StallRule Validation
 
     [Fact]

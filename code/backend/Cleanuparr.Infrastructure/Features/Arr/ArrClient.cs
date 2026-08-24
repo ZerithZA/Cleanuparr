@@ -5,6 +5,7 @@ using Cleanuparr.Domain.Enums;
 using Cleanuparr.Infrastructure.Features.Arr.Interfaces;
 using Cleanuparr.Infrastructure.Features.Context;
 using Cleanuparr.Infrastructure.Features.ItemStriker;
+using Cleanuparr.Infrastructure.Features.Ollama;
 using Cleanuparr.Infrastructure.Interceptors;
 using Cleanuparr.Persistence.Models.Configuration.Arr;
 using Cleanuparr.Persistence.Models.Configuration.QueueCleaner;
@@ -96,39 +97,53 @@ public abstract class ArrClient : IArrClient
         return count;
     }
 
+    protected bool ShouldIgnoreForPrivateTracker(QueueCleanerConfig config, bool isPrivateDownload) =>
+        config.FailedImport.IgnorePrivate && isPrivateDownload;
+
+    /// <summary>
+    /// Base implementation of the AI-assisted import hook: always <see cref="AiImportOutcome.Skipped"/>.
+    /// Meaningfully overridden only by <see cref="SonarrClient"/>. This protects concrete
+    /// subclasses that do not override it; it does not protect mocks (see AiImportOutcome.Skipped's
+    /// doc comment for why <c>Skipped = 0</c> is what actually keeps unstubbed
+    /// <c>Substitute.For&lt;IArrClient&gt;()</c> mocks inert).
+    /// </summary>
+    public virtual Task<AiImportOutcome> TryAiAssistedImportAsync(ArrInstance instance, QueueRecord record, bool isPrivateDownload) =>
+        Task.FromResult(AiImportOutcome.Skipped);
+
+    /// <summary>
+    /// Determines whether a queue record carries the AI-import target status message
+    /// (<see cref="Persistence.Models.Configuration.QueueCleaner.AiImportConfig.TargetMessagePrefix"/>)
+    /// in one of its <see cref="TrackedDownloadStatusMessage.Messages"/> entries.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately searches <c>StatusMessages[].Messages[]</c> only, never
+    /// <see cref="TrackedDownloadStatusMessage.Title"/>. Unlike <see cref="ShouldStrikeFailedImport"/>,
+    /// which merges <c>.Title</c> into its pattern-match set because it matches user-supplied
+    /// patterns against release names, this predicate matches a single fixed message prefix; on the
+    /// observed live capture <c>.Title</c> is a verbatim copy of the release title, so including it
+    /// here would turn this into a release-title search rather than a status-message search. Do not
+    /// add <c>.Title</c> to this search (AC-49). Also deliberately does not inspect
+    /// <see cref="QueueRecord.TrackedDownloadState"/> in any form (AC-48) - see
+    /// <see cref="SonarrClient.TryAiAssistedImportAsync"/> for why.
+    /// </remarks>
+    protected static bool HasAiTargetStatusMessage(QueueRecord record, string targetMessagePrefix) =>
+        record.StatusMessages
+            ?.Any(status => status.Messages
+                ?.Any(message => message.StartsWith(targetMessagePrefix, StringComparison.InvariantCultureIgnoreCase)) is true
+            ) is true;
+
     public virtual async Task<bool> ShouldRemoveFromQueue(InstanceType instanceType, QueueRecord record, bool isPrivateDownload, short arrMaxStrikes)
     {
         var queueCleanerConfig = ContextProvider.Get<QueueCleanerConfig>();
-        
-        if (queueCleanerConfig.FailedImport.IgnorePrivate && isPrivateDownload)
+
+        if (ShouldIgnoreForPrivateTracker(queueCleanerConfig, isPrivateDownload))
         {
             // ignore private trackers
             _logger.LogDebug("skip failed import check | download is private | {name}", record.Title);
             return false;
         }
-        
-        bool HasWarn() => record.TrackedDownloadStatus
-            .Equals("warning", StringComparison.InvariantCultureIgnoreCase);
-        bool IsImportBlocked() => record.TrackedDownloadState
-            .Equals("importBlocked", StringComparison.InvariantCultureIgnoreCase);
-        bool IsImportPending() => record.TrackedDownloadState
-            .Equals("importPending", StringComparison.InvariantCultureIgnoreCase);
-        bool IsImportFailed() => record.TrackedDownloadState
-            .Equals("importFailed", StringComparison.InvariantCultureIgnoreCase);
-        bool IsFailedLidarr() => instanceType is InstanceType.Lidarr &&
-                                 (record.Status.Equals("failed", StringComparison.InvariantCultureIgnoreCase) ||
-                                  record.Status.Equals("completed", StringComparison.InvariantCultureIgnoreCase)) &&
-                                 HasWarn();
-        bool IsDownloading() => record.TrackedDownloadState
-            .Equals("downloading", StringComparison.InvariantCultureIgnoreCase);
-        bool HasFailedImportMessage() => record.StatusMessages
-            ?.Any(status => status.Messages
-                ?.Any(message => message.StartsWith("Unable to import automatically", StringComparison.InvariantCultureIgnoreCase)) is true
-            ) is true;
-        bool IsEdgeCase() => IsDownloading() && HasFailedImportMessage();
-            
-        
-        if (HasWarn() && (IsImportBlocked() || IsImportPending() || IsImportFailed()) || IsFailedLidarr() || IsEdgeCase())
+
+        if (IsFailedImportCandidate(instanceType, record))
         {
             if (!ShouldStrikeFailedImport(queueCleanerConfig, record))
             {
@@ -161,7 +176,37 @@ public abstract class ArrClient : IArrClient
 
         return false;
     }
-    
+
+    /// <summary>
+    /// Determines whether a queue record's tracked download status/state and status messages
+    /// indicate a failed import that should be considered for striking. Deliberately non-virtual:
+    /// no subclass should be able to override this gating predicate.
+    /// </summary>
+    protected bool IsFailedImportCandidate(InstanceType instanceType, QueueRecord record)
+    {
+        bool HasWarn() => record.TrackedDownloadStatus
+            .Equals("warning", StringComparison.InvariantCultureIgnoreCase);
+        bool IsImportBlocked() => record.TrackedDownloadState
+            .Equals("importBlocked", StringComparison.InvariantCultureIgnoreCase);
+        bool IsImportPending() => record.TrackedDownloadState
+            .Equals("importPending", StringComparison.InvariantCultureIgnoreCase);
+        bool IsImportFailed() => record.TrackedDownloadState
+            .Equals("importFailed", StringComparison.InvariantCultureIgnoreCase);
+        bool IsFailedLidarr() => instanceType is InstanceType.Lidarr &&
+                                 (record.Status.Equals("failed", StringComparison.InvariantCultureIgnoreCase) ||
+                                  record.Status.Equals("completed", StringComparison.InvariantCultureIgnoreCase)) &&
+                                 HasWarn();
+        bool IsDownloading() => record.TrackedDownloadState
+            .Equals("downloading", StringComparison.InvariantCultureIgnoreCase);
+        bool HasFailedImportMessage() => record.StatusMessages
+            ?.Any(status => status.Messages
+                ?.Any(message => message.StartsWith("Unable to import automatically", StringComparison.InvariantCultureIgnoreCase)) is true
+            ) is true;
+        bool IsEdgeCase() => IsDownloading() && HasFailedImportMessage();
+
+        return HasWarn() && (IsImportBlocked() || IsImportPending() || IsImportFailed()) || IsFailedLidarr() || IsEdgeCase();
+    }
+
     public virtual async Task DeleteQueueItemAsync(
         ArrInstance arrInstance,
         QueueRecord record,

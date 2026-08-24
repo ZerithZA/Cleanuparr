@@ -6,9 +6,11 @@ using Cleanuparr.Domain.Entities.Sonarr;
 using Cleanuparr.Domain.Enums;
 using Cleanuparr.Infrastructure.Features.Arr;
 using Cleanuparr.Infrastructure.Features.ItemStriker;
+using Cleanuparr.Infrastructure.Features.Ollama;
 using Cleanuparr.Infrastructure.Interceptors;
 using Cleanuparr.Infrastructure.Tests.TestHelpers;
 using Cleanuparr.Persistence.Models.Configuration.Arr;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
 using NSubstitute;
@@ -35,7 +37,11 @@ public class SportarrClientTests
         var httpClientFactory = Substitute.For<IHttpClientFactory>();
         httpClientFactory.CreateClient(Arg.Any<string>()).Returns(httpClient);
 
-        _client = new SportarrClient(logger, httpClientFactory, striker, _dryRunInterceptor);
+        var ollamaClient = Substitute.For<IOllamaClient>();
+        var aiImportBudget = Substitute.For<IAiImportBudget>();
+        var cache = new MemoryCache(new MemoryCacheOptions());
+
+        _client = new SportarrClient(logger, httpClientFactory, striker, _dryRunInterceptor, ollamaClient, aiImportBudget, cache);
         _arrInstance = new ArrInstance
         {
             Name = "sportarr",

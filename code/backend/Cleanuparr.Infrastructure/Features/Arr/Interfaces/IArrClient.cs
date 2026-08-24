@@ -1,6 +1,7 @@
 using Cleanuparr.Domain.Entities.Arr;
 using Cleanuparr.Domain.Entities.Arr.Queue;
 using Cleanuparr.Domain.Enums;
+using Cleanuparr.Infrastructure.Features.Ollama;
 using Cleanuparr.Persistence.Models.Configuration.Arr;
 
 namespace Cleanuparr.Infrastructure.Features.Arr.Interfaces;
@@ -10,6 +11,17 @@ public interface IArrClient
     Task<QueueListResponse> GetQueueItemsAsync(ArrInstance arrInstance, int page);
 
     Task<bool> ShouldRemoveFromQueue(InstanceType instanceType, QueueRecord record, bool isPrivateDownload, short arrMaxStrikes);
+
+    /// <summary>
+    /// Attempts an AI-assisted manual import for a queue record that failed automatic import.
+    /// Meaningfully implemented only by <see cref="Cleanuparr.Infrastructure.Features.Arr.SonarrClient"/>;
+    /// every other implementer returns <see cref="AiImportOutcome.Skipped"/> unconditionally via
+    /// the base implementation on the abstract <c>ArrClient</c> class.
+    /// </summary>
+    /// <param name="instance">The *arr instance hosting the queue item.</param>
+    /// <param name="record">The queue record to evaluate.</param>
+    /// <param name="isPrivateDownload">Whether the download is from a private tracker.</param>
+    Task<AiImportOutcome> TryAiAssistedImportAsync(ArrInstance instance, QueueRecord record, bool isPrivateDownload);
 
     /// <summary>
     /// Removes a queue item from the *arr instance.

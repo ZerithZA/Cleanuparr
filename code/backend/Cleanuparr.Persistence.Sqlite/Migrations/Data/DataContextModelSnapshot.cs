@@ -1406,6 +1406,58 @@ namespace Cleanuparr.Persistence.Migrations.Data
                         .HasColumnType("INTEGER")
                         .HasColumnName("use_advanced_scheduling");
 
+                    b.ComplexProperty(typeof(Dictionary<string, object>), "AiImport", "Cleanuparr.Persistence.Models.Configuration.QueueCleaner.QueueCleanerConfig.AiImport#AiImportConfig", b1 =>
+                        {
+                            b1.IsRequired();
+
+                            b1.Property<int>("BreakerCooldownMinutes")
+                                .HasColumnType("INTEGER")
+                                .HasColumnName("ai_import_breaker_cooldown_minutes");
+
+                            b1.Property<int>("BreakerFailureThreshold")
+                                .HasColumnType("INTEGER")
+                                .HasColumnName("ai_import_breaker_failure_threshold");
+
+                            b1.Property<int>("ConfidenceThreshold")
+                                .HasColumnType("INTEGER")
+                                .HasColumnName("ai_import_confidence_threshold");
+
+                            b1.Property<int>("DecisionCacheTtlHours")
+                                .HasColumnType("INTEGER")
+                                .HasColumnName("ai_import_decision_cache_ttl_hours");
+
+                            b1.Property<bool>("Enabled")
+                                .HasColumnType("INTEGER")
+                                .HasColumnName("ai_import_enabled");
+
+                            b1.Property<string>("Model")
+                                .IsRequired()
+                                .HasColumnType("TEXT")
+                                .HasColumnName("ai_import_model");
+
+                            b1.Property<string>("OllamaUrl")
+                                .IsRequired()
+                                .HasColumnType("TEXT")
+                                .HasColumnName("ai_import_ollama_url");
+
+                            b1.Property<int>("SkipBudget")
+                                .HasColumnType("INTEGER")
+                                .HasColumnName("ai_import_skip_budget");
+
+                            b1.Property<string>("TargetMessagePrefix")
+                                .IsRequired()
+                                .HasColumnType("TEXT")
+                                .HasColumnName("ai_import_target_message_prefix");
+
+                            b1.Property<int>("TickBudgetSeconds")
+                                .HasColumnType("INTEGER")
+                                .HasColumnName("ai_import_tick_budget_seconds");
+
+                            b1.Property<int>("TimeoutSeconds")
+                                .HasColumnType("INTEGER")
+                                .HasColumnName("ai_import_timeout_seconds");
+                        });
+
                     b.ComplexProperty(typeof(Dictionary<string, object>), "FailedImport", "Cleanuparr.Persistence.Models.Configuration.QueueCleaner.QueueCleanerConfig.FailedImport#FailedImportConfig", b1 =>
                         {
                             b1.IsRequired();

@@ -20,7 +20,9 @@ public sealed record QueueCleanerConfig : IJobConfig
     public bool UseAdvancedScheduling { get; set; } = false;
     
     public FailedImportConfig FailedImport { get; set; } = new();
-    
+
+    public AiImportConfig AiImport { get; set; } = new();
+
     public List<string> IgnoredDownloads { get; set; } = [];
 
     public bool ProcessNoContentId { get; set; }
@@ -34,7 +36,8 @@ public sealed record QueueCleanerConfig : IJobConfig
     public void Validate()
     {
         FailedImport.Validate();
-        
+        AiImport.Validate();
+
         if (DownloadingMetadataMaxStrikes is > 0 and < 3)
         {
             throw new ValidationException("the minimum value for downloading metadata max strikes must be 3");

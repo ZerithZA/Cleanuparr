@@ -62,6 +62,16 @@ public sealed class HttpClientConfigurationServiceTests : IDisposable
         _clientFactory.Received(1).RegisterPlainClient(Constants.HttpClientPlexAuthName, sendUserAgent);
         _clientFactory.Received(1).RegisterPlainClient(Constants.HttpClientOidcAuthName, sendUserAgent);
         _clientFactory.Received(1).RegisterPlainClient(Constants.HttpClientConnectivityName, sendUserAgent);
+
+        // AC-19: the Ollama client is registered via RegisterPlainClient (HttpClientType.Plain),
+        // never via RegisterRetryClient, so it never resolves through the retry-enabled client.
+        _clientFactory.Received(1).RegisterPlainClient(Constants.HttpClientOllamaName, sendUserAgent);
+        _clientFactory.DidNotReceive().RegisterRetryClient(
+            Constants.HttpClientOllamaName,
+            Arg.Any<int>(),
+            Arg.Any<RetryConfig>(),
+            Arg.Any<CertificateValidationType>(),
+            Arg.Any<bool>());
     }
 
     [Fact]

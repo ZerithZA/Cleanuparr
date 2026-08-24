@@ -15,6 +15,7 @@ using Cleanuparr.Infrastructure.Features.Files;
 using Cleanuparr.Infrastructure.Features.ItemStriker;
 using Cleanuparr.Infrastructure.Features.Jobs;
 using Cleanuparr.Infrastructure.Features.MalwareBlocker;
+using Cleanuparr.Infrastructure.Features.Ollama;
 using Cleanuparr.Infrastructure.Helpers;
 using Cleanuparr.Infrastructure.Interceptors;
 using Cleanuparr.Infrastructure.Services;
@@ -43,6 +44,8 @@ public static class ServicesDI
             .AddHostedService<EventCleanupService>()
             .AddScoped<IDryRunInterceptor, DryRunInterceptor>()
             .AddScoped<CertificateValidationService>()
+            .AddSingleton<IAiImportBudget, AiImportBudget>()
+            .AddScoped<IOllamaClient, OllamaClient>()
             .AddScoped<ISonarrClient, SonarrClient>()
             .AddScoped<ISportarrClient, SportarrClient>()
             .AddScoped<IRadarrClient, RadarrClient>()

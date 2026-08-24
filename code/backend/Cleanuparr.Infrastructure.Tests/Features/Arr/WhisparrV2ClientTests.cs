@@ -4,9 +4,11 @@ using Cleanuparr.Domain.Entities.Arr;
 using Cleanuparr.Domain.Enums;
 using Cleanuparr.Infrastructure.Features.Arr;
 using Cleanuparr.Infrastructure.Features.ItemStriker;
+using Cleanuparr.Infrastructure.Features.Ollama;
 using Cleanuparr.Infrastructure.Interceptors;
 using Cleanuparr.Infrastructure.Tests.TestHelpers;
 using Cleanuparr.Persistence.Models.Configuration.Arr;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
 using NSubstitute;
@@ -21,6 +23,9 @@ public class WhisparrV2ClientTests
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IStriker _striker;
     private readonly IDryRunInterceptor _dryRunInterceptor;
+    private readonly IOllamaClient _ollamaClient;
+    private readonly IAiImportBudget _aiImportBudget;
+    private readonly IMemoryCache _cache;
     private readonly FakeHttpMessageHandler _httpMessageHandler;
     private readonly WhisparrV2Client _client;
     private readonly ArrInstance _arrInstance;
@@ -31,6 +36,9 @@ public class WhisparrV2ClientTests
         _httpClientFactory = Substitute.For<IHttpClientFactory>();
         _striker = Substitute.For<IStriker>();
         _dryRunInterceptor = Substitute.For<IDryRunInterceptor>();
+        _ollamaClient = Substitute.For<IOllamaClient>();
+        _aiImportBudget = Substitute.For<IAiImportBudget>();
+        _cache = new MemoryCache(new MemoryCacheOptions());
         _httpMessageHandler = new FakeHttpMessageHandler();
 
         var httpClient = new HttpClient(_httpMessageHandler);
@@ -40,7 +48,10 @@ public class WhisparrV2ClientTests
             _logger,
             _httpClientFactory,
             _striker,
-            _dryRunInterceptor
+            _dryRunInterceptor,
+            _ollamaClient,
+            _aiImportBudget,
+            _cache
         );
         _arrInstance = new ArrInstance
         {

@@ -69,6 +69,7 @@ public class HttpClientConfigurationService : IHostedService
             _clientFactory.RegisterPlainClient(Constants.HttpClientPlexAuthName, config.HttpSendUserAgent);
             _clientFactory.RegisterPlainClient(Constants.HttpClientOidcAuthName, config.HttpSendUserAgent);
             _clientFactory.RegisterPlainClient(Constants.HttpClientConnectivityName, config.HttpSendUserAgent);
+            _clientFactory.RegisterPlainClient(Constants.HttpClientOllamaName, config.HttpSendUserAgent);
 
 
             _logger.LogInformation("Pre-registered standard HTTP client configurations");

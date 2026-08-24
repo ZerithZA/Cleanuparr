@@ -16,6 +16,8 @@ public static class Constants
 
     public const string HttpClientConnectivityName = "Connectivity";
 
+    public const string HttpClientOllamaName = "Ollama";
+
     public static readonly MemoryCacheEntryOptions DefaultCacheEntryOptions = new()
     {
         SlidingExpiration = TimeSpan.FromMinutes(10)

@@ -1,0 +1,36 @@
+{
+  "_fixtureNote": "The manual-import COMMAND payload shape, derived from reading the Sonarr/Sonarr source on GitHub (branch: develop) on 2026-08-23. This command was NOT executed against the live instance - Step 0 is explicitly forbidden from calling it. This fixture documents its expected shape only, for Step 4's TryManualImportAsync to target. Sources: src/NzbDrone.Core/MediaFiles/EpisodeImport/Manual/ManualImportCommand.cs, src/NzbDrone.Core/MediaFiles/EpisodeImport/Manual/ManualImportFile.cs, src/NzbDrone.Core/MediaFiles/EpisodeImport/ImportMode.cs, src/Sonarr.Api.V3/Commands/CommandController.cs.",
+  "endpoint": {
+    "method": "POST",
+    "url": "http://<host>/api/v3/command",
+    "dispatchMechanism": "Generic command endpoint. CommandController.StartCommand resolves the concrete Command subtype by matching commandResource.Name (case-insensitive) against the Command-derived type name with 'Command' suffix stripped - i.e. name 'ManualImport' resolves to NzbDrone.Core.MediaFiles.EpisodeImport.Manual.ManualImportCommand. PostValidator requires Name to be non-blank."
+  },
+  "commandClassSource": "public class ManualImportCommand : Command { public List<ManualImportFile> Files { get; set; } public override bool SendUpdatesToClient => true; public override bool RequiresDiskAccess => true; public ImportMode ImportMode { get; set; } }",
+  "manualImportFileClassSource": "public class ManualImportFile { public string Path { get; set; } public string FolderName { get; set; } public int SeriesId { get; set; } public List<int> EpisodeIds { get; set; } = []; public int? EpisodeFileId { get; set; } public QualityModel Quality { get; set; } = new(); public List<Language> Languages { get; set; } = []; public string ReleaseGroup { get; set; } public int IndexerFlags { get; set; } public ReleaseType ReleaseType { get; set; } public string DownloadId { get; set; } }",
+  "importModeEnumSource": "public enum ImportMode { Auto = 0, Move = 1, Copy = 2 }",
+  "importModeRequired": true,
+  "importModeNotes": "ImportMode is a plain (non-nullable) property on ManualImportCommand with no default set at declaration and no [Optional]/nullable annotation, so JSON deserialization leaves it at the enum's default ordinal (0 = Auto) if omitted from the request body - it is not strictly REQUIRED for the request to be accepted, but omitting it silently selects Auto rather than failing. The plan should send it explicitly rather than relying on the implicit default. 'Move' (1) is Sonarr's typical value for the standard manual-import-from-download-client flow (moves the file out of the download client's directory into the library, consistent with Sonarr's own default download-client post-processing behavior); 'Copy' (2) leaves the source in place; 'Auto' (0) defers to Sonarr's own per-download-client Move/Copy preference. Recommend the plan send 'Move' explicitly to match existing non-AI import behavior in this codebase, but this recommendation is inferred from source/enum semantics only - it was not verified by an actual live call in this session (that call is explicitly out of scope for Step 0).",
+  "exampleRequestBodyForCapturedRecord": {
+    "name": "ManualImport",
+    "files": [
+      {
+        "path": "/mnt/sabnzbd/downloads/nzb/tv/Resident Alien [2024] S03E02 Ustunluk 1080p Netflix.WEBDL H264 EAC3 TSRG/Resident Alien (2024) S03E02 Üstünlük 1080p Netflix  WEBDL H264 EAC3 @TSRG.mkv",
+        "folderName": "Resident Alien [2024] S03E02 Ustunluk 1080p Netflix.WEBDL H264 EAC3 TSRG",
+        "seriesId": 1781,
+        "episodeIds": [91707],
+        "quality": {
+          "quality": { "id": 3, "name": "WEBDL-1080p", "source": "web", "resolution": 1080 },
+          "revision": { "version": 1, "real": 0, "isRepack": false }
+        },
+        "languages": [
+          { "id": 1, "name": "English" },
+          { "id": 17, "name": "Turkish" }
+        ],
+        "releaseType": "singleEpisode",
+        "downloadId": "62ad6b32-0eff-449c-9cab-85565aa59ed6"
+      }
+    ],
+    "importMode": "Move",
+    "_constructedFrom": "manualimport-candidate-list-downloadid.json response fields (path, folderName, series.id, episodes[].id, quality, languages, releaseType, downloadId). This body was NEVER SENT - it is illustrative only, assembled from the real candidate-list response plus the source-derived command shape above."
+  }
+}

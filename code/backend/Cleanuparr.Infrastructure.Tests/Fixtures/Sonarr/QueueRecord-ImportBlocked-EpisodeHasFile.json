@@ -1,0 +1,65 @@
+{
+  "seriesId": 1781,
+  "episodeId": 91707,
+  "seasonNumber": 3,
+  "languages": [
+    {
+      "id": 1,
+      "name": "English"
+    }
+  ],
+  "quality": {
+    "quality": {
+      "id": 3,
+      "name": "WEBDL-1080p",
+      "source": "web",
+      "resolution": 1080
+    },
+    "revision": {
+      "version": 1,
+      "real": 0,
+      "isRepack": false
+    }
+  },
+  "customFormats": [
+    {
+      "id": 1,
+      "name": "English"
+    },
+    {
+      "id": 21,
+      "name": "NF"
+    },
+    {
+      "id": 64,
+      "name": "No-RlsGroup"
+    }
+  ],
+  "customFormatScore": 10060,
+  "size": 2137048129,
+  "title": "Resident Alien [2024] S03E02 Ustunluk 1080p Netflix.WEBDL H264 EAC3 TSRG",
+  "estimatedCompletionTime": "2026-08-23T20:02:02Z",
+  "added": "2026-07-04T10:46:07Z",
+  "status": "completed",
+  "trackedDownloadStatus": "warning",
+  "trackedDownloadState": "importBlocked",
+  "statusMessages": [
+    {
+      "title": "Resident Alien [2024] S03E02 Ustunluk 1080p Netflix.WEBDL H264 EAC3 TSRG",
+      "messages": [
+        "Found matching series via grab history, but release was matched to series by ID. Automatic import is not possible. See the FAQ for details."
+      ]
+    }
+  ],
+  "errorMessage": "",
+  "downloadId": "62ad6b32-0eff-449c-9cab-85565aa59ed6",
+  "protocol": "usenet",
+  "downloadClient": "SABnzbd",
+  "downloadClientHasPostImportCategory": false,
+  "indexer": "NZBHydra",
+  "outputPath": "/mnt/sabnzbd/downloads/nzb/tv/Resident Alien [2024] S03E02 Ustunluk 1080p Netflix.WEBDL H264 EAC3 TSRG/",
+  "episodeHasFile": true,
+  "sizeleft": 0,
+  "timeleft": "00:00:00",
+  "id": 1191304180
+}

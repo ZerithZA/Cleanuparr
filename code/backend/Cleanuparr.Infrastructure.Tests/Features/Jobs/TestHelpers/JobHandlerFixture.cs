@@ -7,6 +7,7 @@ using Cleanuparr.Infrastructure.Features.Files;
 using Cleanuparr.Infrastructure.Features.Jobs;
 using Cleanuparr.Infrastructure.Features.LazyLibrarian;
 using Cleanuparr.Infrastructure.Features.MalwareBlocker;
+using Cleanuparr.Infrastructure.Features.Ollama;
 using Cleanuparr.Infrastructure.Interceptors;
 using Cleanuparr.Persistence;
 using MassTransit;
@@ -45,6 +46,7 @@ public class JobHandlerFixture : IDisposable
     public ILogger<SeedingRulesCleanupService> SeedingRulesLogger { get; private set; }
     public ILogger<UnlinkedDownloadsService> UnlinkedLogger { get; private set; }
     public ILogger<OrphanedFilesCleanupService> OrphanedFilesLogger { get; private set; }
+    public IAiImportBudget AiImportBudget { get; private set; }
 
     public JobHandlerFixture()
     {
@@ -64,6 +66,8 @@ public class JobHandlerFixture : IDisposable
         LazyLibrarianServiceQC = Substitute.For<ILazyLibrarianEvaluator>();
         LazyLibrarianServiceCB = Substitute.For<ILazyLibrarianEvaluator>();
         TimeProvider = new FakeTimeProvider();
+        AiImportBudget = Substitute.For<IAiImportBudget>();
+        AiImportBudget.CanCallOllama().Returns(true);
         RecreateCleanupServices();
 
         // Setup default behaviors
@@ -166,6 +170,8 @@ public class JobHandlerFixture : IDisposable
         DryRunInterceptor = Substitute.For<IDryRunInterceptor>();
         Cache.Clear();
         TimeProvider = new FakeTimeProvider();
+        AiImportBudget = Substitute.For<IAiImportBudget>();
+        AiImportBudget.CanCallOllama().Returns(true);
         RecreateCleanupServices();
 
         SetupDefaultBehaviors();

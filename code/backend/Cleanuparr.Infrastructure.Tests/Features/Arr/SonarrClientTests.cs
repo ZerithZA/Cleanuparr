@@ -1,3 +1,4 @@
+using System.IO;
 using System.Net;
 using System.Text;
 using Cleanuparr.Domain.Entities.Arr;
@@ -5,10 +6,14 @@ using Cleanuparr.Domain.Entities.Arr.Queue;
 using Cleanuparr.Domain.Entities.Sonarr;
 using Cleanuparr.Domain.Enums;
 using Cleanuparr.Infrastructure.Features.Arr;
+using Cleanuparr.Infrastructure.Features.Context;
 using Cleanuparr.Infrastructure.Features.ItemStriker;
+using Cleanuparr.Infrastructure.Features.Ollama;
 using Cleanuparr.Infrastructure.Interceptors;
 using Cleanuparr.Infrastructure.Tests.TestHelpers;
 using Cleanuparr.Persistence.Models.Configuration.Arr;
+using Cleanuparr.Persistence.Models.Configuration.QueueCleaner;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
 using NSubstitute;
@@ -19,27 +24,35 @@ namespace Cleanuparr.Infrastructure.Tests.Features.Arr;
 
 public class SonarrClientTests
 {
+    private readonly ILogger<SonarrClient> _logger;
     private readonly IStriker _striker;
     private readonly IDryRunInterceptor _dryRunInterceptor;
+    private readonly IOllamaClient _ollamaClient;
+    private readonly IAiImportBudget _aiImportBudget;
+    private readonly IMemoryCache _cache;
     private readonly FakeHttpMessageHandler _httpMessageHandler;
-    private readonly SonarrClient _client;
+    private readonly TestSonarrClient _client;
     private readonly ArrInstance _arrInstance;
 
     public SonarrClientTests()
     {
-        var logger = Substitute.For<ILogger<SonarrClient>>();
+        var logger = _logger = Substitute.For<ILogger<SonarrClient>>();
         _striker = Substitute.For<IStriker>();
         _dryRunInterceptor = Substitute.For<IDryRunInterceptor>();
+        _ollamaClient = Substitute.For<IOllamaClient>();
+        _aiImportBudget = Substitute.For<IAiImportBudget>();
+        _cache = new MemoryCache(new MemoryCacheOptions());
         _httpMessageHandler = new FakeHttpMessageHandler();
 
         var httpClient = new HttpClient(_httpMessageHandler);
         var httpClientFactory = Substitute.For<IHttpClientFactory>();
         httpClientFactory.CreateClient(Arg.Any<string>()).Returns(httpClient);
 
-        _client = new SonarrClient(logger, httpClientFactory, _striker, _dryRunInterceptor);
+        _client = new TestSonarrClient(logger, httpClientFactory, _striker, _dryRunInterceptor, _ollamaClient, _aiImportBudget, _cache);
         _arrInstance = new ArrInstance
         {
             Name = "sonarr",
+            ArrConfig = new ArrConfig { Type = InstanceType.Sonarr },
             Url = new Uri("http://localhost:8989/"),
             ApiKey = "api-key",
         };
@@ -52,6 +65,9 @@ public class SonarrClientTests
                 Func<Task<HttpResponseMessage>> action = ci.Arg<Func<Task<HttpResponseMessage>>>();
                 return await action();
             });
+
+        // Default: budget allows Ollama calls.
+        _aiImportBudget.CanCallOllama().Returns(true);
     }
 
     #region Queue URL overrides (via GetQueueItemsAsync / DeleteQueueItemAsync / HealthCheckAsync)
@@ -510,4 +526,731 @@ public class SonarrClientTests
     };
 
     #endregion
+
+    #region TryManualImportAsync
+
+    [Fact]
+    public async Task TryManualImportAsync_SingleCandidate_IssuesManualImportCommand()
+    {
+        // Arrange
+        var record = BuildRecord(1);
+        var candidate = new SonarrManualImportCandidate
+        {
+            Path = "/downloads/show/episode.mkv",
+            FolderName = "show",
+            SeriesId = 1781,
+            Episodes = [new SonarrManualImportEpisode { Id = 91707, HasFile = false }],
+            ReleaseType = "singleEpisode",
+            DownloadId = record.DownloadId,
+        };
+
+        _httpMessageHandler.SetupResponse((req, _) =>
+        {
+            if (req.Method == HttpMethod.Get && req.RequestUri!.AbsolutePath.EndsWith("/manualimport"))
+            {
+                return Task.FromResult(JsonResponse(new[] { candidate }));
+            }
+
+            if (req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath.EndsWith("/command"))
+            {
+                return Task.FromResult(JsonResponse(new { id = 1L }));
+            }
+
+            return Task.FromResult(JsonNullResponse());
+        });
+
+        // Act
+        bool result = await _client.TryManualImportAsyncPublic(_arrInstance, record);
+
+        // Assert
+        result.ShouldBeTrue();
+        var candidateListRequest = _httpMessageHandler.CapturedRequests.ShouldContain(
+            r => r.Method == HttpMethod.Get && r.RequestUri!.AbsolutePath.EndsWith("/manualimport"));
+        candidateListRequest.RequestUri!.Query.ShouldBe($"?downloadId={record.DownloadId}");
+
+        var commandRequest = _httpMessageHandler.CapturedRequests.ShouldContain(
+            r => r.Method == HttpMethod.Post && r.RequestUri!.AbsolutePath.EndsWith("/command"));
+        commandRequest.RequestUri!.AbsolutePath.ShouldBe("/api/v3/command");
+    }
+
+    [Fact]
+    public async Task TryManualImportAsync_MultipleCandidates_SkipsWithoutIssuingCommand()
+    {
+        // Arrange
+        var record = BuildRecord(2);
+        var candidates = new[]
+        {
+            new SonarrManualImportCandidate { Path = "/a.mkv", SeriesId = 1, DownloadId = record.DownloadId },
+            new SonarrManualImportCandidate { Path = "/b.mkv", SeriesId = 1, DownloadId = record.DownloadId },
+        };
+
+        _httpMessageHandler.SetupResponse((_, _) => Task.FromResult(JsonResponse(candidates)));
+
+        // Act
+        bool result = await _client.TryManualImportAsyncPublic(_arrInstance, record);
+
+        // Assert
+        result.ShouldBeFalse();
+        _httpMessageHandler.CapturedRequests.ShouldNotContain(r => r.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task TryManualImportAsync_NoCandidates_SkipsWithoutIssuingCommand()
+    {
+        // Arrange
+        var record = BuildRecord(3);
+        _httpMessageHandler.SetupResponse((_, _) =>
+            Task.FromResult(JsonResponse(Array.Empty<SonarrManualImportCandidate>())));
+
+        // Act
+        bool result = await _client.TryManualImportAsyncPublic(_arrInstance, record);
+
+        // Assert
+        result.ShouldBeFalse();
+        _httpMessageHandler.CapturedRequests.ShouldNotContain(r => r.Method == HttpMethod.Post);
+    }
+
+    #endregion
+
+    #region TryAiAssistedImportAsync
+
+    private static void SetQueueCleanerConfig(QueueCleanerConfig config) => ContextProvider.Set(config);
+
+    private const string TargetMessagePrefix = "Found matching series via grab history";
+
+    private static QueueRecord BuildAiCandidateRecord(
+        long id = 1,
+        bool episodeHasFile = false,
+        string trackedDownloadState = "importBlocked",
+        string? message = TargetMessagePrefix + ", but release was matched to series by ID")
+    {
+        return new QueueRecord
+        {
+            Id = id,
+            Title = $"item-{id}",
+            DownloadId = id.ToString(),
+            Protocol = "usenet",
+            SeriesId = 1781,
+            EpisodeHasFile = episodeHasFile,
+            TrackedDownloadStatus = "warning",
+            TrackedDownloadState = trackedDownloadState,
+            StatusMessages = message is null
+                ? new List<TrackedDownloadStatusMessage> { new() { Title = $"item-{id}", Messages = ["some other message"] } }
+                : new List<TrackedDownloadStatusMessage> { new() { Title = $"item-{id}", Messages = [message] } },
+        };
+    }
+
+    private static QueueCleanerConfig BuildAiImportEnabledConfig(int confidenceThreshold = 75, bool ignorePrivate = false, int skipBudget = 3) => new()
+    {
+        FailedImport = new FailedImportConfig { IgnorePrivate = ignorePrivate, MaxStrikes = 3, PatternMode = PatternMode.Exclude },
+        AiImport = new AiImportConfig
+        {
+            Enabled = true,
+            ConfidenceThreshold = confidenceThreshold,
+            TargetMessagePrefix = TargetMessagePrefix,
+            SkipBudget = skipBudget,
+        },
+    };
+
+    private void SetupSeriesResponse(string title = "Show Title", params string[] aliases)
+    {
+        _httpMessageHandler.SetupResponse((req, _) =>
+        {
+            if (req.Method == HttpMethod.Get && req.RequestUri!.AbsolutePath.Contains("/series/"))
+            {
+                return Task.FromResult(JsonResponse(new
+                {
+                    id = 1781,
+                    title,
+                    alternateTitles = aliases.Select(a => new { title = a }).ToArray(),
+                }));
+            }
+
+            return Task.FromResult(JsonNullResponse());
+        });
+    }
+
+    private void SetupOllamaSuccess(bool match, int confidence, string reasoning = "reasoning") =>
+        _ollamaClient
+            .ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>())
+            .Returns(new OllamaClassificationResponse(OllamaClassificationOutcome.Success, new OllamaClassificationResult(match, confidence, reasoning)));
+
+    // AC-7: WhisparrV2Client leak guard.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_WhisparrV2Instance_ReturnsSkippedWithZeroOllamaCalls()
+    {
+        // Arrange
+        var whisparrClient = new WhisparrV2Client(
+            Substitute.For<ILogger<WhisparrV2Client>>(),
+            Substitute.For<IHttpClientFactory>(),
+            _striker,
+            _dryRunInterceptor,
+            _ollamaClient,
+            _aiImportBudget,
+            _cache);
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        var instance = new ArrInstance
+        {
+            Name = "whisparr",
+            ArrConfig = new ArrConfig { Type = InstanceType.Whisparr },
+            Version = 2,
+            Url = new Uri("http://localhost:6969/"),
+            ApiKey = "key",
+        };
+        var record = BuildAiCandidateRecord();
+
+        // Act
+        var outcome = await whisparrClient.TryAiAssistedImportAsync(instance, record, isPrivateDownload: false);
+
+        // Assert
+        outcome.ShouldBe(AiImportOutcome.Skipped);
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+    }
+
+    // AC-7b: SportarrClient leak guard.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_SportarrInstance_ReturnsSkippedWithZeroOllamaCalls()
+    {
+        // Arrange
+        var sportarrClient = new SportarrClient(
+            Substitute.For<ILogger<SportarrClient>>(),
+            Substitute.For<IHttpClientFactory>(),
+            _striker,
+            _dryRunInterceptor,
+            _ollamaClient,
+            _aiImportBudget,
+            _cache);
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        var instance = new ArrInstance
+        {
+            Name = "sportarr",
+            ArrConfig = new ArrConfig { Type = InstanceType.Sportarr },
+            Url = new Uri("http://localhost:6970/"),
+            ApiKey = "key",
+        };
+        var record = BuildAiCandidateRecord();
+
+        // Act
+        var outcome = await sportarrClient.TryAiAssistedImportAsync(instance, record, isPrivateDownload: false);
+
+        // Assert
+        outcome.ShouldBe(AiImportOutcome.Skipped);
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+    }
+
+    // AC-8: non-Sonarr real instance types.
+    [Theory]
+    [InlineData(InstanceType.Radarr)]
+    [InlineData(InstanceType.Lidarr)]
+    [InlineData(InstanceType.Readarr)]
+    [InlineData(InstanceType.Whisparr)]
+    [InlineData(InstanceType.Sportarr)]
+    [InlineData(InstanceType.LazyLibrarian)]
+    public async Task TryAiAssistedImportAsync_NonSonarrInstanceType_ReturnsSkippedWithZeroOllamaCalls(InstanceType instanceType)
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        var instance = new ArrInstance
+        {
+            Name = "instance",
+            ArrConfig = new ArrConfig { Type = instanceType },
+            Url = new Uri("http://localhost:8989/"),
+            ApiKey = "key",
+        };
+        var record = BuildAiCandidateRecord();
+
+        // Act
+        var outcome = await _client.TryAiAssistedImportAsync(instance, record, isPrivateDownload: false);
+
+        // Assert
+        outcome.ShouldBe(AiImportOutcome.Skipped);
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+    }
+
+    // AC-13: private tracker + IgnorePrivate.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_IgnorePrivateAndIsPrivate_ReturnsSkippedWithZeroOllamaCalls()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig(ignorePrivate: true));
+        var record = BuildAiCandidateRecord();
+
+        // Act
+        var outcome = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: true);
+
+        // Assert
+        outcome.ShouldBe(AiImportOutcome.Skipped);
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+    }
+
+    // Feature disabled.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_FeatureDisabled_ReturnsSkippedWithZeroOllamaCalls()
+    {
+        // Arrange
+        var config = BuildAiImportEnabledConfig();
+        config.AiImport = config.AiImport with { Enabled = false };
+        SetQueueCleanerConfig(config);
+        var record = BuildAiCandidateRecord();
+
+        // Act
+        var outcome = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        outcome.ShouldBe(AiImportOutcome.Skipped);
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+    }
+
+    // AC-6 / AC-48-adjacent: non-candidate message does not invoke the AI path.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_NonCandidateMessage_ReturnsSkippedWithZeroOllamaCalls()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        var record = BuildAiCandidateRecord(message: "No files found are eligible for import in ...");
+
+        // Act
+        var outcome = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        outcome.ShouldBe(AiImportOutcome.Skipped);
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+    }
+
+    // AC-49: message must live in .Messages[], not .Title.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_TargetPrefixOnlyInTitle_ReturnsSkippedWithZeroOllamaCalls()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        var record = BuildAiCandidateRecord() with
+        {
+            StatusMessages = new List<TrackedDownloadStatusMessage>
+            {
+                new() { Title = TargetMessagePrefix + " some release name", Messages = ["unrelated"] },
+            },
+        };
+
+        // Act
+        var outcome = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        outcome.ShouldBe(AiImportOutcome.Skipped);
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+    }
+
+    // AC-48: candidacy must not depend on TrackedDownloadState.
+    [Theory]
+    [InlineData("downloading")]
+    [InlineData("importPending")]
+    [InlineData("importFailed")]
+    [InlineData("someUnknownFutureState")]
+    public async Task TryAiAssistedImportAsync_CandidacyIgnoresTrackedDownloadState(string trackedDownloadState)
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        SetupSeriesResponse();
+        SetupOllamaSuccess(match: true, confidence: 90);
+        var record = BuildAiCandidateRecord(trackedDownloadState: trackedDownloadState);
+        RouteManualImportAndSeries();
+
+        // Act
+        await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert — Ollama was invoked regardless of trackedDownloadState.
+        await _ollamaClient.Received(1).ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+    }
+
+    // AC-14: dry run short-circuits before any HTTP call.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_DryRun_ReturnsSkippedBeforeAnyHttpCall()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        _dryRunInterceptor.IsDryRunEnabled().Returns(true);
+        var record = BuildAiCandidateRecord();
+
+        // Act
+        var outcome = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        outcome.ShouldBe(AiImportOutcome.Skipped);
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+        _httpMessageHandler.CapturedRequests.ShouldBeEmpty();
+    }
+
+    // AC-15: dry-run log only fires for genuine candidates (behavioural proxy: outcome/Ollama calls
+    // differ between a candidate and a non-candidate under dry run).
+    [Fact]
+    public async Task TryAiAssistedImportAsync_DryRun_NonCandidate_MakesNoHttpCallsEither()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        _dryRunInterceptor.IsDryRunEnabled().Returns(true);
+        var record = BuildAiCandidateRecord(message: "unrelated message");
+
+        // Act
+        var outcome = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert — candidacy guard (guard 5) runs before the dry-run guard (guard 6), so a
+        // non-candidate never reaches — and never logs — the dry-run branch.
+        outcome.ShouldBe(AiImportOutcome.Skipped);
+        _httpMessageHandler.CapturedRequests.ShouldBeEmpty();
+    }
+
+    // Circuit breaker / tick budget exhausted.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_BudgetExhausted_ReturnsSkippedWithZeroOllamaCalls()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        _aiImportBudget.CanCallOllama().Returns(false);
+        var record = BuildAiCandidateRecord();
+
+        // Act
+        var outcome = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        outcome.ShouldBe(AiImportOutcome.Skipped);
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+    }
+
+    // Low confidence -> FallThrough.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_LowConfidence_ReturnsFallThroughWithoutImporting()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig(confidenceThreshold: 75));
+        SetupSeriesResponse();
+        SetupOllamaSuccess(match: true, confidence: 50);
+        var record = BuildAiCandidateRecord();
+
+        // Act
+        var outcome = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        outcome.ShouldBe(AiImportOutcome.FallThrough);
+        _httpMessageHandler.CapturedRequests.ShouldNotContain(r => r.Method == HttpMethod.Post);
+    }
+
+    // No match -> FallThrough.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_NoMatch_ReturnsFallThroughWithoutImporting()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        SetupSeriesResponse();
+        SetupOllamaSuccess(match: false, confidence: 100);
+        var record = BuildAiCandidateRecord();
+
+        // Act
+        var outcome = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        outcome.ShouldBe(AiImportOutcome.FallThrough);
+        _httpMessageHandler.CapturedRequests.ShouldNotContain(r => r.Method == HttpMethod.Post);
+    }
+
+    // AC-33: confidence exactly at the threshold (75) with match: true yields Imported.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_ConfidenceExactlyAtThreshold_ReturnsImported()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig(confidenceThreshold: 75));
+        var record = BuildAiCandidateRecord();
+        RouteManualImportAndSeries();
+        SetupOllamaSuccess(match: true, confidence: 75);
+
+        // Act
+        var outcome = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        outcome.ShouldBe(AiImportOutcome.Imported);
+        _httpMessageHandler.CapturedRequests.ShouldContain(r => r.Method == HttpMethod.Post && r.RequestUri!.AbsolutePath.EndsWith("/command"));
+    }
+
+    // AC-33: confidence one point below the threshold (74) with match: true yields FallThrough.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_ConfidenceOneBelowThreshold_ReturnsFallThrough()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig(confidenceThreshold: 75));
+        SetupSeriesResponse();
+        SetupOllamaSuccess(match: true, confidence: 74);
+        var record = BuildAiCandidateRecord();
+
+        // Act
+        var outcome = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        outcome.ShouldBe(AiImportOutcome.FallThrough);
+        _httpMessageHandler.CapturedRequests.ShouldNotContain(r => r.Method == HttpMethod.Post);
+    }
+
+    // AC-22: idempotency key format is DownloadId + instance.Url, matching CacheKeys.
+    // DownloadMarkedForRemoval's existing convention. Asserted behaviourally: a record whose
+    // DownloadId differs only by case still hits the same cache entry (ToLowerInvariant), while a
+    // different Url does not (covered by AC-22b above).
+    [Fact]
+    public async Task TryAiAssistedImportAsync_AfterImported_DownloadIdCaseInsensitive_SubsequentTickReturnsSkipped()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        var record = BuildAiCandidateRecord() with { DownloadId = "abc123def456" };
+        RouteManualImportAndSeries();
+        SetupOllamaSuccess(match: true, confidence: 90);
+
+        var first = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+        first.ShouldBe(AiImportOutcome.Imported);
+        _ollamaClient.ClearReceivedCalls();
+
+        var upperCaseIdRecord = record with { DownloadId = record.DownloadId.ToUpperInvariant() };
+
+        // Act
+        var second = await _client.TryAiAssistedImportAsync(_arrInstance, upperCaseIdRecord, isPrivateDownload: false);
+
+        // Assert
+        second.ShouldBe(AiImportOutcome.Skipped);
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+    }
+
+    // AC-50 / AC-50b: EpisodeHasFile suppresses the import but classification still happens/logs.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_EpisodeHasFile_ClassifiesButDoesNotImport()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        SetupSeriesResponse();
+        SetupOllamaSuccess(match: true, confidence: 95);
+        var record = BuildAiCandidateRecord(episodeHasFile: true);
+
+        // Act
+        var outcome = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert — classification WAS performed (Ollama called), but no manual-import command issued.
+        outcome.ShouldBe(AiImportOutcome.FallThrough);
+        await _ollamaClient.Received(1).ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+        _httpMessageHandler.CapturedRequests.ShouldNotContain(r => r.Method == HttpMethod.Post);
+    }
+
+    // High confidence + no existing file -> Imported.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_HighConfidenceNoExistingFile_IssuesManualImportAndReturnsImported()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        var record = BuildAiCandidateRecord();
+        RouteManualImportAndSeries();
+        SetupOllamaSuccess(match: true, confidence: 90);
+
+        // Act
+        var outcome = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        outcome.ShouldBe(AiImportOutcome.Imported);
+        _httpMessageHandler.CapturedRequests.ShouldContain(r => r.Method == HttpMethod.Post && r.RequestUri!.AbsolutePath.EndsWith("/command"));
+    }
+
+    // AC-21: idempotency — a subsequent tick for the same DownloadId+Url after Imported returns Skipped.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_AfterImported_SubsequentTickReturnsSkippedWithoutCallingOllama()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        var record = BuildAiCandidateRecord();
+        RouteManualImportAndSeries();
+        SetupOllamaSuccess(match: true, confidence: 90);
+
+        var first = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+        first.ShouldBe(AiImportOutcome.Imported);
+        _ollamaClient.ClearReceivedCalls();
+        _httpMessageHandler.CapturedRequests.Clear();
+
+        // Act
+        var second = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        second.ShouldBe(AiImportOutcome.Skipped);
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+        _httpMessageHandler.CapturedRequests.ShouldBeEmpty();
+    }
+
+    // AC-22b: two distinct Sonarr instances sharing a DownloadId do not collide.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_TwoInstancesSameDownloadId_DoNotSuppressEachOther()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        var record = BuildAiCandidateRecord();
+        RouteManualImportAndSeries();
+        SetupOllamaSuccess(match: true, confidence: 90);
+
+        var instanceA = _arrInstance;
+        var instanceB = new ArrInstance
+        {
+            Name = "sonarr-b",
+            ArrConfig = new ArrConfig { Type = InstanceType.Sonarr },
+            Url = new Uri("http://localhost:8990/"),
+            ApiKey = "api-key-b",
+        };
+
+        var resultA = await _client.TryAiAssistedImportAsync(instanceA, record, isPrivateDownload: false);
+        resultA.ShouldBe(AiImportOutcome.Imported);
+
+        // Act
+        var resultB = await _client.TryAiAssistedImportAsync(instanceB, record, isPrivateDownload: false);
+
+        // Assert — instance B's import is not suppressed by instance A's cache entry.
+        resultB.ShouldBe(AiImportOutcome.Imported);
+        await _ollamaClient.Received(2).ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+    }
+
+    // AC-23/AC-24: consecutive-skip budget.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_SkipBudgetExhausted_BypassesAiPathEntirely()
+    {
+        // Arrange — every classification attempt fails at the transport level, exhausting the
+        // per-DownloadId skip budget (default in this test: 3).
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig(skipBudget: 3));
+        SetupSeriesResponse();
+        _ollamaClient
+            .ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>())
+            .Returns(new OllamaClassificationResponse(OllamaClassificationOutcome.TransportFailure));
+        var record = BuildAiCandidateRecord();
+
+        for (int i = 0; i < 3; i++)
+        {
+            var outcome = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+            outcome.ShouldBe(AiImportOutcome.Skipped);
+        }
+
+        _ollamaClient.ClearReceivedCalls();
+
+        // Act — the 4th consecutive attempt should bypass Ollama entirely (skip budget exhausted).
+        var finalOutcome = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        finalOutcome.ShouldBe(AiImportOutcome.Skipped);
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+    }
+
+    // AC-24: the consecutive-skip counter resets on a FallThrough/Imported outcome.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_ConsecutiveSkipCounter_ResetsOnFallThrough()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig(skipBudget: 3));
+        SetupSeriesResponse();
+        var record = BuildAiCandidateRecord();
+
+        // Two transport failures (2 of 3 skip budget consumed)...
+        _ollamaClient
+            .ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>())
+            .Returns(new OllamaClassificationResponse(OllamaClassificationOutcome.TransportFailure));
+        await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+        await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // ...then a successful low-confidence classification (FallThrough) resets the counter.
+        SetupOllamaSuccess(match: true, confidence: 10);
+        var fallThroughOutcome = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+        fallThroughOutcome.ShouldBe(AiImportOutcome.FallThrough);
+
+        // Two more transport failures should not exhaust the budget, since the counter reset.
+        _ollamaClient
+            .ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>())
+            .Returns(new OllamaClassificationResponse(OllamaClassificationOutcome.TransportFailure));
+        await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+        await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+        _ollamaClient.ClearReceivedCalls();
+
+        // Act — the 3rd failure since the reset should still call Ollama (budget not yet exhausted).
+        _ollamaClient
+            .ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>())
+            .Returns(new OllamaClassificationResponse(OllamaClassificationOutcome.TransportFailure));
+        await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        await _ollamaClient.Received(1).ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+    }
+
+    // AC-25: skip-budget exhaustion is logged once at Warning level, naming the record and
+    // reason, and does not recur every subsequent tick (i.e. once the budget is already
+    // exhausted, later attempts that bypass Ollama entirely must not log the warning again).
+    [Fact]
+    public async Task TryAiAssistedImportAsync_SkipBudgetExhausted_LogsWarningOnceNotOnSubsequentTicks()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig(skipBudget: 3));
+        SetupSeriesResponse();
+        _ollamaClient
+            .ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>())
+            .Returns(new OllamaClassificationResponse(OllamaClassificationOutcome.TransportFailure));
+        var record = BuildAiCandidateRecord();
+
+        for (int i = 0; i < 3; i++)
+        {
+            await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+        }
+
+        // Act — two further ticks after the budget is already exhausted.
+        await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+        await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert — the "skip budget exhausted" warning fires exactly once (on the 4th attempt,
+        // the first to observe the budget as exhausted), not again on the 5th.
+        _logger.ReceivedLogContaining(LogLevel.Warning, "skip budget exhausted", count: 1);
+    }
+
+    private void RouteManualImportAndSeries()
+    {
+        var candidate = new SonarrManualImportCandidate
+        {
+            Path = "/downloads/show/episode.mkv",
+            FolderName = "show",
+            SeriesId = 1781,
+            Episodes = [new SonarrManualImportEpisode { Id = 91707, HasFile = false }],
+            ReleaseType = "singleEpisode",
+            DownloadId = "1",
+        };
+
+        _httpMessageHandler.SetupResponse((req, _) =>
+        {
+            if (req.Method == HttpMethod.Get && req.RequestUri!.AbsolutePath.Contains("/series/"))
+            {
+                return Task.FromResult(JsonResponse(new { id = 1781, title = "Show Title", alternateTitles = Array.Empty<object>() }));
+            }
+
+            if (req.Method == HttpMethod.Get && req.RequestUri!.AbsolutePath.EndsWith("/manualimport"))
+            {
+                return Task.FromResult(JsonResponse(new[] { candidate }));
+            }
+
+            if (req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath.EndsWith("/command"))
+            {
+                return Task.FromResult(JsonResponse(new { id = 1L }));
+            }
+
+            return Task.FromResult(JsonNullResponse());
+        });
+    }
+
+    #endregion
+
+    private sealed class TestSonarrClient : SonarrClient
+    {
+        public TestSonarrClient(
+            ILogger<SonarrClient> logger,
+            IHttpClientFactory httpClientFactory,
+            IStriker striker,
+            IDryRunInterceptor dryRunInterceptor,
+            IOllamaClient ollamaClient,
+            IAiImportBudget aiImportBudget,
+            IMemoryCache cache
+        ) : base(logger, httpClientFactory, striker, dryRunInterceptor, ollamaClient, aiImportBudget, cache)
+        {
+        }
+
+        public Task<bool> TryManualImportAsyncPublic(ArrInstance arrInstance, QueueRecord record) =>
+            TryManualImportAsync(arrInstance, record);
+    }
 }
