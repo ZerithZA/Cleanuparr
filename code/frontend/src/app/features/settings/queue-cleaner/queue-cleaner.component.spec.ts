@@ -384,14 +384,14 @@ describe('QueueCleanerComponent', () => {
         skipBudget: 2,
         decisionCacheTtlHours: 12,
         ollamaUrl: 'http://localhost:11434',
-        model: 'llama3.2:3b',
+        model: 'llama3.1:8b',
         targetMessagePrefix: 'Found matching series via grab history',
       },
     });
 
     expect(component.qcForm.aiImportEnabled().value()).toBe(true);
     expect(component.qcForm.aiImportOllamaUrl().value()).toBe('http://localhost:11434');
-    expect(component.qcForm.aiImportModel().value()).toBe('llama3.2:3b');
+    expect(component.qcForm.aiImportModel().value()).toBe('llama3.1:8b');
     expect(component.qcForm.aiImportConfidenceThreshold().value()).toBe(80);
     expect(component.qcForm.aiImportTimeoutSeconds().value()).toBe(10);
     expect(component.dirty()).toBe(false);
@@ -447,7 +447,7 @@ describe('QueueCleanerComponent', () => {
 
     component.qcForm.aiImportEnabled().value.set(true);
     component.qcForm.aiImportOllamaUrl().value.set('http://localhost:11434');
-    component.qcForm.aiImportModel().value.set('llama3.2:3b');
+    component.qcForm.aiImportModel().value.set('llama3.1:8b');
     fixture.detectChanges();
 
     expect(component.dirty()).toBe(true);
@@ -459,7 +459,7 @@ describe('QueueCleanerComponent', () => {
         aiImport: expect.objectContaining({
           enabled: true,
           ollamaUrl: 'http://localhost:11434',
-          model: 'llama3.2:3b',
+          model: 'llama3.1:8b',
         }),
       }),
     );
