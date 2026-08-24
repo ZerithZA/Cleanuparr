@@ -31,7 +31,7 @@ public class SonarrClientTests
     private readonly IAiImportBudget _aiImportBudget;
     private readonly IMemoryCache _cache;
     private readonly FakeHttpMessageHandler _httpMessageHandler;
-    private readonly TestSonarrClient _client;
+    private readonly SonarrClient _client;
     private readonly ArrInstance _arrInstance;
 
     public SonarrClientTests()
@@ -48,7 +48,7 @@ public class SonarrClientTests
         var httpClientFactory = Substitute.For<IHttpClientFactory>();
         httpClientFactory.CreateClient(Arg.Any<string>()).Returns(httpClient);
 
-        _client = new TestSonarrClient(logger, httpClientFactory, _striker, _dryRunInterceptor, _ollamaClient, _aiImportBudget, _cache);
+        _client = new SonarrClient(logger, httpClientFactory, _striker, _dryRunInterceptor, _ollamaClient, _aiImportBudget, _cache);
         _arrInstance = new ArrInstance
         {
             Name = "sonarr",
@@ -525,6 +525,14 @@ public class SonarrClientTests
         Content = new StringContent("null", Encoding.UTF8, "application/json"),
     };
 
+    /// <summary>
+    /// A valid, empty-object <see cref="JsonElement"/>. <see cref="SonarrManualImportCandidate.Quality"/>
+    /// and <see cref="SonarrManualImportCandidate.Languages"/> are non-nullable JsonElement properties;
+    /// leaving them unset in an object initializer defaults to <c>default(JsonElement)</c>
+    /// (ValueKind.Undefined), which JsonSerializer.Serialize throws on.
+    /// </summary>
+    private static JsonElement EmptyJsonObject() => JsonDocument.Parse("{}").RootElement;
+
     #endregion
 
     #region TryManualImportAsync
@@ -540,6 +548,8 @@ public class SonarrClientTests
             FolderName = "show",
             SeriesId = 1781,
             Episodes = [new SonarrManualImportEpisode { Id = 91707, HasFile = false }],
+            Quality = EmptyJsonObject(),
+            Languages = EmptyJsonObject(),
             ReleaseType = "singleEpisode",
             DownloadId = record.DownloadId,
         };
@@ -560,15 +570,19 @@ public class SonarrClientTests
         });
 
         // Act
-        bool result = await _client.TryManualImportAsyncPublic(_arrInstance, record);
+        bool result = await TryManualImportAsyncPublic(_client, _arrInstance, record);
 
         // Assert
         result.ShouldBeTrue();
-        var candidateListRequest = _httpMessageHandler.CapturedRequests.ShouldContain(
+        _httpMessageHandler.CapturedRequests.ShouldContain(
+            r => r.Method == HttpMethod.Get && r.RequestUri!.AbsolutePath.EndsWith("/manualimport"));
+        var candidateListRequest = _httpMessageHandler.CapturedRequests.First(
             r => r.Method == HttpMethod.Get && r.RequestUri!.AbsolutePath.EndsWith("/manualimport"));
         candidateListRequest.RequestUri!.Query.ShouldBe($"?downloadId={record.DownloadId}");
 
-        var commandRequest = _httpMessageHandler.CapturedRequests.ShouldContain(
+        _httpMessageHandler.CapturedRequests.ShouldContain(
+            r => r.Method == HttpMethod.Post && r.RequestUri!.AbsolutePath.EndsWith("/command"));
+        var commandRequest = _httpMessageHandler.CapturedRequests.First(
             r => r.Method == HttpMethod.Post && r.RequestUri!.AbsolutePath.EndsWith("/command"));
         commandRequest.RequestUri!.AbsolutePath.ShouldBe("/api/v3/command");
     }
@@ -580,14 +594,14 @@ public class SonarrClientTests
         var record = BuildRecord(2);
         var candidates = new[]
         {
-            new SonarrManualImportCandidate { Path = "/a.mkv", SeriesId = 1, DownloadId = record.DownloadId },
-            new SonarrManualImportCandidate { Path = "/b.mkv", SeriesId = 1, DownloadId = record.DownloadId },
+            new SonarrManualImportCandidate { Path = "/a.mkv", SeriesId = 1, DownloadId = record.DownloadId, Quality = EmptyJsonObject(), Languages = EmptyJsonObject() },
+            new SonarrManualImportCandidate { Path = "/b.mkv", SeriesId = 1, DownloadId = record.DownloadId, Quality = EmptyJsonObject(), Languages = EmptyJsonObject() },
         };
 
         _httpMessageHandler.SetupResponse((_, _) => Task.FromResult(JsonResponse(candidates)));
 
         // Act
-        bool result = await _client.TryManualImportAsyncPublic(_arrInstance, record);
+        bool result = await TryManualImportAsyncPublic(_client, _arrInstance, record);
 
         // Assert
         result.ShouldBeFalse();
@@ -603,7 +617,7 @@ public class SonarrClientTests
             Task.FromResult(JsonResponse(Array.Empty<SonarrManualImportCandidate>())));
 
         // Act
-        bool result = await _client.TryManualImportAsyncPublic(_arrInstance, record);
+        bool result = await TryManualImportAsyncPublic(_client, _arrInstance, record);
 
         // Assert
         result.ShouldBeFalse();
@@ -627,7 +641,10 @@ public class SonarrClientTests
         return new QueueRecord
         {
             Id = id,
-            Title = $"item-{id}",
+            // "Show" deliberately overlaps with the default series title ("Show Title") used by
+            // SetupSeriesResponse/RouteManualImportAndSeries, so the token-overlap pre-filter
+            // (SonarrClient.HasTokenOverlap) does not block these AI-candidate fixtures.
+            Title = $"Show.item-{id}",
             DownloadId = id.ToString(),
             Protocol = "usenet",
             SeriesId = 1781,
@@ -672,7 +689,7 @@ public class SonarrClientTests
 
     private void SetupOllamaSuccess(bool match, int confidence, string reasoning = "reasoning") =>
         _ollamaClient
-            .ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>())
+            .ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>())
             .Returns(new OllamaClassificationResponse(OllamaClassificationOutcome.Success, new OllamaClassificationResult(match, confidence, reasoning)));
 
     // AC-7: WhisparrV2Client leak guard.
@@ -704,7 +721,7 @@ public class SonarrClientTests
 
         // Assert
         outcome.ShouldBe(AiImportOutcome.Skipped);
-        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
     }
 
     // AC-7b: SportarrClient leak guard.
@@ -735,7 +752,7 @@ public class SonarrClientTests
 
         // Assert
         outcome.ShouldBe(AiImportOutcome.Skipped);
-        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
     }
 
     // AC-8: non-Sonarr real instance types.
@@ -764,7 +781,7 @@ public class SonarrClientTests
 
         // Assert
         outcome.ShouldBe(AiImportOutcome.Skipped);
-        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
     }
 
     // AC-13: private tracker + IgnorePrivate.
@@ -780,7 +797,7 @@ public class SonarrClientTests
 
         // Assert
         outcome.ShouldBe(AiImportOutcome.Skipped);
-        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
     }
 
     // Feature disabled.
@@ -798,7 +815,7 @@ public class SonarrClientTests
 
         // Assert
         outcome.ShouldBe(AiImportOutcome.Skipped);
-        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
     }
 
     // AC-6 / AC-48-adjacent: non-candidate message does not invoke the AI path.
@@ -814,7 +831,7 @@ public class SonarrClientTests
 
         // Assert
         outcome.ShouldBe(AiImportOutcome.Skipped);
-        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
     }
 
     // AC-49: message must live in .Messages[], not .Title.
@@ -836,7 +853,7 @@ public class SonarrClientTests
 
         // Assert
         outcome.ShouldBe(AiImportOutcome.Skipped);
-        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
     }
 
     // AC-48: candidacy must not depend on TrackedDownloadState.
@@ -858,7 +875,7 @@ public class SonarrClientTests
         await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
 
         // Assert — Ollama was invoked regardless of trackedDownloadState.
-        await _ollamaClient.Received(1).ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+        await _ollamaClient.Received(1).ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
     }
 
     // AC-14: dry run short-circuits before any HTTP call.
@@ -875,7 +892,7 @@ public class SonarrClientTests
 
         // Assert
         outcome.ShouldBe(AiImportOutcome.Skipped);
-        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
         _httpMessageHandler.CapturedRequests.ShouldBeEmpty();
     }
 
@@ -912,7 +929,7 @@ public class SonarrClientTests
 
         // Assert
         outcome.ShouldBe(AiImportOutcome.Skipped);
-        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
     }
 
     // Low confidence -> FallThrough.
@@ -1011,7 +1028,7 @@ public class SonarrClientTests
 
         // Assert
         second.ShouldBe(AiImportOutcome.Skipped);
-        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
     }
 
     // AC-50 / AC-50b: EpisodeHasFile suppresses the import but classification still happens/logs.
@@ -1029,7 +1046,7 @@ public class SonarrClientTests
 
         // Assert — classification WAS performed (Ollama called), but no manual-import command issued.
         outcome.ShouldBe(AiImportOutcome.FallThrough);
-        await _ollamaClient.Received(1).ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+        await _ollamaClient.Received(1).ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
         _httpMessageHandler.CapturedRequests.ShouldNotContain(r => r.Method == HttpMethod.Post);
     }
 
@@ -1071,7 +1088,7 @@ public class SonarrClientTests
 
         // Assert
         second.ShouldBe(AiImportOutcome.Skipped);
-        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
         _httpMessageHandler.CapturedRequests.ShouldBeEmpty();
     }
 
@@ -1102,7 +1119,7 @@ public class SonarrClientTests
 
         // Assert — instance B's import is not suppressed by instance A's cache entry.
         resultB.ShouldBe(AiImportOutcome.Imported);
-        await _ollamaClient.Received(2).ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+        await _ollamaClient.Received(2).ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
     }
 
     // AC-23/AC-24: consecutive-skip budget.
@@ -1114,7 +1131,7 @@ public class SonarrClientTests
         SetQueueCleanerConfig(BuildAiImportEnabledConfig(skipBudget: 3));
         SetupSeriesResponse();
         _ollamaClient
-            .ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>())
+            .ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>())
             .Returns(new OllamaClassificationResponse(OllamaClassificationOutcome.TransportFailure));
         var record = BuildAiCandidateRecord();
 
@@ -1131,7 +1148,7 @@ public class SonarrClientTests
 
         // Assert
         finalOutcome.ShouldBe(AiImportOutcome.Skipped);
-        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+        await _ollamaClient.DidNotReceive().ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
     }
 
     // AC-24: the consecutive-skip counter resets on a FallThrough/Imported outcome.
@@ -1145,7 +1162,7 @@ public class SonarrClientTests
 
         // Two transport failures (2 of 3 skip budget consumed)...
         _ollamaClient
-            .ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>())
+            .ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>())
             .Returns(new OllamaClassificationResponse(OllamaClassificationOutcome.TransportFailure));
         await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
         await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
@@ -1157,7 +1174,7 @@ public class SonarrClientTests
 
         // Two more transport failures should not exhaust the budget, since the counter reset.
         _ollamaClient
-            .ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>())
+            .ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>())
             .Returns(new OllamaClassificationResponse(OllamaClassificationOutcome.TransportFailure));
         await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
         await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
@@ -1165,12 +1182,12 @@ public class SonarrClientTests
 
         // Act — the 3rd failure since the reset should still call Ollama (budget not yet exhausted).
         _ollamaClient
-            .ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>())
+            .ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>())
             .Returns(new OllamaClassificationResponse(OllamaClassificationOutcome.TransportFailure));
         await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
 
         // Assert
-        await _ollamaClient.Received(1).ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>());
+        await _ollamaClient.Received(1).ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
     }
 
     // AC-25: skip-budget exhaustion is logged once at Warning level, naming the record and
@@ -1183,7 +1200,7 @@ public class SonarrClientTests
         SetQueueCleanerConfig(BuildAiImportEnabledConfig(skipBudget: 3));
         SetupSeriesResponse();
         _ollamaClient
-            .ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>())
+            .ClassifyAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>())
             .Returns(new OllamaClassificationResponse(OllamaClassificationOutcome.TransportFailure));
         var record = BuildAiCandidateRecord();
 
@@ -1209,6 +1226,8 @@ public class SonarrClientTests
             FolderName = "show",
             SeriesId = 1781,
             Episodes = [new SonarrManualImportEpisode { Id = 91707, HasFile = false }],
+            Quality = EmptyJsonObject(),
+            Languages = EmptyJsonObject(),
             ReleaseType = "singleEpisode",
             DownloadId = "1",
         };
@@ -1236,21 +1255,371 @@ public class SonarrClientTests
 
     #endregion
 
-    private sealed class TestSonarrClient : SonarrClient
-    {
-        public TestSonarrClient(
-            ILogger<SonarrClient> logger,
-            IHttpClientFactory httpClientFactory,
-            IStriker striker,
-            IDryRunInterceptor dryRunInterceptor,
-            IOllamaClient ollamaClient,
-            IAiImportBudget aiImportBudget,
-            IMemoryCache cache
-        ) : base(logger, httpClientFactory, striker, dryRunInterceptor, ollamaClient, aiImportBudget, cache)
-        {
-        }
+    #region TryAiAssistedImportAsync - token-overlap pre-filter
 
-        public Task<bool> TryManualImportAsyncPublic(ArrInstance arrInstance, QueueRecord record) =>
-            TryManualImportAsync(arrInstance, record);
+    // The pre-filter blocks a release with zero real textual relationship to the assigned series
+    // before Ollama is ever called.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_ReleaseTitleUnrelatedToSeriesTitle_ReturnsSkippedWithZeroOllamaCalls()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        SetupSeriesResponse(title: "Completely Unrelated Series Name");
+        var record = BuildAiCandidateRecord() with { Title = "Some.Random.Show.S01E01.1080p.WEB-DL" };
+
+        // Act
+        var outcome = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        outcome.ShouldBe(AiImportOutcome.Skipped);
+        await _ollamaClient.DidNotReceive().ClassifyAsync(
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
+    }
+
+    // A release sharing at least one significant token with the series TITLE passes the filter
+    // and reaches Ollama.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_ReleaseTitleSharesTokenWithSeriesTitle_ReachesOllama()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        SetupSeriesResponse(title: "The Ghost In The Shell");
+        SetupOllamaSuccess(match: true, confidence: 90);
+        var record = BuildAiCandidateRecord() with { Title = "Ghost.In.The.Shell.S01E06.1080p.WEB-DL" };
+
+        // Act
+        await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        await _ollamaClient.Received(1).ClassifyAsync(
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
+    }
+
+    // A release with no overlap with the series title, but overlapping an ALIAS, still passes.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_ReleaseTitleSharesTokenWithAliasOnly_ReachesOllama()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        SetupSeriesResponse(title: "The Ghost In The Shell", aliases: "Koukaku Kidoutai");
+        SetupOllamaSuccess(match: true, confidence: 90);
+        // "Kidoutai" is an exact token shared with the alias, even though it shares nothing with
+        // the series title itself.
+        var record = BuildAiCandidateRecord() with { Title = "Kidoutai.S01E06.1080p.WEB-DL" };
+
+        // Act
+        await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        await _ollamaClient.Received(1).ClassifyAsync(
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
+    }
+
+    // KNOWN LIMITATION: matching is exact-token only after normalisation. It does NOT account for
+    // transliteration/spelling variants of the same underlying word. The real production release
+    // "Kokaku.Kidotai...276E06..." against the real alias "Koukaku Kidoutai (2026)" does NOT
+    // overlap under this implementation ("kokaku" != "koukaku", "kidotai" != "kidoutai") - this
+    // test documents that gap rather than claiming it is handled. In production this specific
+    // case is expected to pass the pre-filter only via a token that DOES match exactly (e.g. a
+    // shared season/episode marker is excluded by the length>2 rule, so in the worst case a
+    // release like this can still be blocked by the pre-filter even though it is the correct
+    // match) - the primary fix for this exact scenario is the year/air-date enrichment sent to
+    // Ollama, not this pre-filter.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_TransliterationVariant_DoesNotOverlap_KnownLimitation()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        SetupSeriesResponse(title: "The Ghost In The Shell", aliases: "Koukaku Kidoutai (2026)");
+        var record = BuildAiCandidateRecord() with { Title = "Kokaku.Kidotai.S01E06.1080p.AMZN.WEB-DL" };
+
+        // Act
+        var outcome = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert - documents the known gap: this real match is filtered out by exact-token
+        // matching alone.
+        outcome.ShouldBe(AiImportOutcome.Skipped);
+        await _ollamaClient.DidNotReceive().ClassifyAsync(
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<int?>(), Arg.Any<string?>(), Arg.Any<DateOnly?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
+    }
+
+    #endregion
+
+    #region TryAiAssistedImportAsync - Ollama request enrichment (year / episode title / air date)
+
+    /// <summary>
+    /// Routes series lookup, manual-import candidates, the import command, and the episode
+    /// lookup all from a single handler (FakeHttpMessageHandler.SetupResponse replaces the
+    /// handler wholesale, so these must be combined rather than layered on top of
+    /// RouteManualImportAndSeries).
+    /// </summary>
+    private void RouteManualImportSeriesAndEpisode(
+        long episodeId,
+        string? episodeTitle,
+        DateOnly? episodeAirDate,
+        int runtime = 0,
+        int? seasonNumber = null,
+        int? episodeNumber = null,
+        int? absoluteEpisodeNumber = null)
+    {
+        var candidate = new SonarrManualImportCandidate
+        {
+            Path = "/downloads/show/episode.mkv",
+            FolderName = "show",
+            SeriesId = 1781,
+            Episodes = [new SonarrManualImportEpisode { Id = 91707, HasFile = false }],
+            Quality = EmptyJsonObject(),
+            Languages = EmptyJsonObject(),
+            ReleaseType = "singleEpisode",
+            DownloadId = "1",
+        };
+
+        _httpMessageHandler.SetupResponse((req, _) =>
+        {
+            if (req.Method == HttpMethod.Get && req.RequestUri!.AbsolutePath.EndsWith("/episode"))
+            {
+                if (episodeTitle is null)
+                {
+                    return Task.FromResult(JsonNullResponse());
+                }
+
+                return Task.FromResult(JsonResponse(new[]
+                {
+                    new
+                    {
+                        id = episodeId,
+                        title = episodeTitle,
+                        airDate = episodeAirDate!.Value.ToString("yyyy-MM-dd"),
+                        seasonNumber = seasonNumber ?? 0,
+                        episodeNumber = episodeNumber ?? 0,
+                        absoluteEpisodeNumber,
+                    },
+                }));
+            }
+
+            if (req.Method == HttpMethod.Get && req.RequestUri!.AbsolutePath.Contains("/series/"))
+            {
+                return Task.FromResult(JsonResponse(new { id = 1781, title = "Show Title", alternateTitles = Array.Empty<object>(), runtime }));
+            }
+
+            if (req.Method == HttpMethod.Get && req.RequestUri!.AbsolutePath.EndsWith("/manualimport"))
+            {
+                return Task.FromResult(JsonResponse(new[] { candidate }));
+            }
+
+            if (req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath.EndsWith("/command"))
+            {
+                return Task.FromResult(JsonResponse(new { id = 1L }));
+            }
+
+            return Task.FromResult(JsonNullResponse());
+        });
+    }
+
+    // The series' Year and the fetched episode's Title/AirDate are threaded through to
+    // IOllamaClient.ClassifyAsync.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_SeriesYearAndEpisodeFound_PassesEnrichedFieldsToClassifyAsync()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        var record = BuildAiCandidateRecord() with { EpisodeId = 91707 };
+        RouteManualImportSeriesAndEpisode(91707, "EPISODE 06: DUMB BARTER", new DateOnly(2026, 8, 11));
+        SetupOllamaSuccess(match: true, confidence: 90);
+
+        // Act
+        await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        await _ollamaClient.Received(1).ClassifyAsync(
+            Arg.Any<string>(),
+            Arg.Any<string>(),
+            Arg.Any<IReadOnlyList<string>>(),
+            Arg.Any<int?>(),
+            "EPISODE 06: DUMB BARTER",
+            new DateOnly(2026, 8, 11),
+            Arg.Any<int?>(),
+            Arg.Any<int?>(),
+            Arg.Any<int?>(),
+            Arg.Any<int?>(),
+            Arg.Any<CancellationToken>());
+    }
+
+    // When the episode lookup fails/returns nothing, classification still proceeds using
+    // series-level data only (episode title/air date passed as null) rather than being blocked.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_EpisodeLookupFails_FallsBackToSeriesLevelClassificationOnly()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        var record = BuildAiCandidateRecord() with { EpisodeId = 91707 };
+        RouteManualImportSeriesAndEpisode(91707, episodeTitle: null, episodeAirDate: null); // episode lookup returns null -> falls back
+        SetupOllamaSuccess(match: true, confidence: 90);
+
+        // Act
+        var outcome = await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert - classification still happens (not treated as a hard blocker).
+        outcome.ShouldBe(AiImportOutcome.Imported);
+        await _ollamaClient.Received(1).ClassifyAsync(
+            Arg.Any<string>(),
+            Arg.Any<string>(),
+            Arg.Any<IReadOnlyList<string>>(),
+            Arg.Any<int?>(),
+            Arg.Is<string?>((string?)null),
+            Arg.Is<DateOnly?>((DateOnly?)null),
+            Arg.Any<int?>(),
+            Arg.Any<int?>(),
+            Arg.Any<int?>(),
+            Arg.Any<int?>(),
+            Arg.Any<CancellationToken>());
+    }
+
+    // The series' Runtime is threaded through to IOllamaClient.ClassifyAsync, mirroring the same
+    // 0 -> null treatment already applied to Year (see SonarrClient.cs's ClassifyAsync call site).
+    [Fact]
+    public async Task TryAiAssistedImportAsync_SeriesRuntimeNonZero_PassesRuntimeMinutesToClassifyAsync()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        var record = BuildAiCandidateRecord() with { EpisodeId = 91707 };
+        RouteManualImportSeriesAndEpisode(91707, episodeTitle: null, episodeAirDate: null, runtime: 42);
+        SetupOllamaSuccess(match: true, confidence: 90);
+
+        // Act
+        await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        await _ollamaClient.Received(1).ClassifyAsync(
+            Arg.Any<string>(),
+            Arg.Any<string>(),
+            Arg.Any<IReadOnlyList<string>>(),
+            Arg.Any<int?>(),
+            Arg.Is<string?>((string?)null),
+            Arg.Is<DateOnly?>((DateOnly?)null),
+            Arg.Is<int?>(42),
+            Arg.Any<int?>(),
+            Arg.Any<int?>(),
+            Arg.Any<int?>(),
+            Arg.Any<CancellationToken>());
+    }
+
+    // A series Runtime of 0 (Sonarr's "unset" sentinel) is passed through as null, mirroring how
+    // series.Year is not 0 ? series.Year : null already treats an unset Year.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_SeriesRuntimeZero_PassesNullRuntimeMinutesToClassifyAsync()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        var record = BuildAiCandidateRecord() with { EpisodeId = 91707 };
+        RouteManualImportSeriesAndEpisode(91707, episodeTitle: null, episodeAirDate: null, runtime: 0);
+        SetupOllamaSuccess(match: true, confidence: 90);
+
+        // Act
+        await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        await _ollamaClient.Received(1).ClassifyAsync(
+            Arg.Any<string>(),
+            Arg.Any<string>(),
+            Arg.Any<IReadOnlyList<string>>(),
+            Arg.Any<int?>(),
+            Arg.Is<string?>((string?)null),
+            Arg.Is<DateOnly?>((DateOnly?)null),
+            Arg.Is<int?>((int?)null),
+            Arg.Any<int?>(),
+            Arg.Any<int?>(),
+            Arg.Any<int?>(),
+            Arg.Any<CancellationToken>());
+    }
+
+    // The fetched episode's SeasonNumber/EpisodeNumber/AbsoluteEpisodeNumber are threaded through
+    // to IOllamaClient.ClassifyAsync, mirroring the X-Men-style absolute-numbering example used
+    // elsewhere in this file's test data (season 4, episode 9, absolute 65).
+    [Fact]
+    public async Task TryAiAssistedImportAsync_EpisodeHasSeasonEpisodeAndAbsoluteNumbers_PassesThemToClassifyAsync()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        var record = BuildAiCandidateRecord() with { EpisodeId = 91707 };
+        RouteManualImportSeriesAndEpisode(
+            91707,
+            "EPISODE 09: TITLE",
+            new DateOnly(2026, 8, 11),
+            seasonNumber: 4,
+            episodeNumber: 9,
+            absoluteEpisodeNumber: 65);
+        SetupOllamaSuccess(match: true, confidence: 90);
+
+        // Act
+        await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        await _ollamaClient.Received(1).ClassifyAsync(
+            Arg.Any<string>(),
+            Arg.Any<string>(),
+            Arg.Any<IReadOnlyList<string>>(),
+            Arg.Any<int?>(),
+            Arg.Any<string?>(),
+            Arg.Any<DateOnly?>(),
+            Arg.Any<int?>(),
+            4,
+            9,
+            65,
+            Arg.Any<CancellationToken>());
+    }
+
+    // When the episode has no absolute numbering (the common non-anime case), null is passed
+    // through for expectedAbsoluteEpisodeNumber specifically, not e.g. 0.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_EpisodeAbsoluteNumberNull_PassesNullAbsoluteEpisodeNumberToClassifyAsync()
+    {
+        // Arrange
+        SetQueueCleanerConfig(BuildAiImportEnabledConfig());
+        var record = BuildAiCandidateRecord() with { EpisodeId = 91707 };
+        RouteManualImportSeriesAndEpisode(
+            91707,
+            "EPISODE 09: TITLE",
+            new DateOnly(2026, 8, 11),
+            seasonNumber: 4,
+            episodeNumber: 9,
+            absoluteEpisodeNumber: null);
+        SetupOllamaSuccess(match: true, confidence: 90);
+
+        // Act
+        await _client.TryAiAssistedImportAsync(_arrInstance, record, isPrivateDownload: false);
+
+        // Assert
+        await _ollamaClient.Received(1).ClassifyAsync(
+            Arg.Any<string>(),
+            Arg.Any<string>(),
+            Arg.Any<IReadOnlyList<string>>(),
+            Arg.Any<int?>(),
+            Arg.Any<string?>(),
+            Arg.Any<DateOnly?>(),
+            Arg.Any<int?>(),
+            Arg.Is<int?>(4),
+            Arg.Is<int?>(9),
+            Arg.Is<int?>((int?)null),
+            Arg.Any<CancellationToken>());
+    }
+
+    #endregion
+
+    /// <summary>
+    /// Test-only extension exposing <see cref="SonarrClient.TryManualImportAsync"/> (protected)
+    /// via reflection rather than subclassing. <see cref="SonarrClient.TryAiAssistedImportAsync"/>
+    /// deliberately gates on <c>GetType() != typeof(SonarrClient)</c> to block WhisparrV2Client/
+    /// SportarrClient (both derive from SonarrClient) from reusing its Ollama-import behaviour;
+    /// a naive test subclass would trip that same guard and make every AI-import test observe
+    /// AiImportOutcome.Skipped regardless of setup. Reflection keeps <c>_client</c>'s runtime type
+    /// exactly <see cref="SonarrClient"/> so the guard behaves the same as it does in production.
+    /// </summary>
+    private static Task<bool> TryManualImportAsyncPublic(SonarrClient client, ArrInstance arrInstance, QueueRecord record)
+    {
+        var method = typeof(SonarrClient).GetMethod(
+            "TryManualImportAsync",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        return (Task<bool>)method.Invoke(client, [arrInstance, record])!;
     }
 }

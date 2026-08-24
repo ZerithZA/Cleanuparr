@@ -109,6 +109,67 @@
       </div>
     </app-accordion>
 
+    <app-accordion header="AI-Assisted Import Recovery" subtitle="Uses a local Ollama model to verify a stuck Sonarr import genuinely matches its series before triggering a manual import, for downloads stuck with a specific grab-history mismatch message." [(expanded)]="aiImportExpanded">
+      <div class="form-stack">
+        <app-toggle label="Enabled" [formField]="qcForm.aiImportEnabled"
+          hint="When enabled, an Ollama model will verify stuck imports before Cleanuparr acts on them"
+          helpKey="queue-cleaner:aiImport.enabled" />
+        @if (qcForm.aiImportEnabled().value()) {
+          <div class="form-divider"></div>
+
+          <app-input label="Ollama URL" placeholder="http://localhost:11434" [formField]="qcForm.aiImportOllamaUrl"
+            hint="Base URL of the Ollama server to use for verification"
+            helpKey="queue-cleaner:aiImport.ollamaUrl" />
+          <app-input label="Model" placeholder="llama3.2:3b" [formField]="qcForm.aiImportModel"
+            hint="Name of the Ollama model to use for verification"
+            helpKey="queue-cleaner:aiImport.model" />
+          <app-input label="Target Message Prefix" [formField]="qcForm.aiImportTargetMessagePrefix"
+            hint="Only queue items whose failure message starts with this prefix are considered for AI verification"
+            [error]="qcForm.aiImportTargetMessagePrefix().errors()[0]?.message"
+            helpKey="queue-cleaner:aiImport.targetMessagePrefix" />
+
+          <div class="form-divider"></div>
+
+          <app-number-input label="Confidence Threshold" [formField]="qcForm.aiImportConfidenceThreshold"
+            suffix="%"
+            hint="Minimum confidence (50-100) required before the AI decision is trusted"
+            [error]="qcForm.aiImportConfidenceThreshold().errors()[0]?.message"
+            helpKey="queue-cleaner:aiImport.confidenceThreshold" />
+          <app-number-input label="Timeout Seconds" [formField]="qcForm.aiImportTimeoutSeconds"
+            suffix="s"
+            hint="How long to wait (3-30 seconds) for a response from Ollama before giving up"
+            [error]="qcForm.aiImportTimeoutSeconds().errors()[0]?.message"
+            helpKey="queue-cleaner:aiImport.timeoutSeconds" />
+          <app-number-input label="Tick Budget Seconds" [formField]="qcForm.aiImportTickBudgetSeconds"
+            suffix="s"
+            hint="Maximum total time spent on AI verification per queue cleaner run"
+            [error]="qcForm.aiImportTickBudgetSeconds().errors()[0]?.message"
+            helpKey="queue-cleaner:aiImport.tickBudgetSeconds" />
+
+          <div class="form-divider"></div>
+
+          <app-number-input label="Breaker Failure Threshold" [formField]="qcForm.aiImportBreakerFailureThreshold"
+            hint="Number of consecutive Ollama failures before the circuit breaker opens"
+            [error]="qcForm.aiImportBreakerFailureThreshold().errors()[0]?.message"
+            helpKey="queue-cleaner:aiImport.breakerFailureThreshold" />
+          <app-number-input label="Breaker Cooldown Minutes" [formField]="qcForm.aiImportBreakerCooldownMinutes"
+            suffix="min"
+            hint="How long the circuit breaker stays open before retrying Ollama"
+            [error]="qcForm.aiImportBreakerCooldownMinutes().errors()[0]?.message"
+            helpKey="queue-cleaner:aiImport.breakerCooldownMinutes" />
+          <app-number-input label="Skip Budget" [formField]="qcForm.aiImportSkipBudget"
+            hint="Number of consecutive low-confidence skips allowed before falling back to the normal strike path"
+            [error]="qcForm.aiImportSkipBudget().errors()[0]?.message"
+            helpKey="queue-cleaner:aiImport.skipBudget" />
+          <app-number-input label="Decision Cache TTL Hours" [formField]="qcForm.aiImportDecisionCacheTtlHours"
+            suffix="h"
+            hint="How long a cached AI decision for a download stays valid"
+            [error]="qcForm.aiImportDecisionCacheTtlHours().errors()[0]?.message"
+            helpKey="queue-cleaner:aiImport.decisionCacheTtlHours" />
+        }
+      </div>
+    </app-accordion>
+
     <!-- Stalled Download Rules -->
     <app-accordion header="Stalled Download Rules" subtitle="Rules for detecting and handling stalled downloads" [(expanded)]="stallExpanded">
       @if (stallCoverage().hasGaps) {

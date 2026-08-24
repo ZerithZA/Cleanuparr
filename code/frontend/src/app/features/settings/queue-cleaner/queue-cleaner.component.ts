@@ -49,6 +49,17 @@ interface QueueCleanerFormModel {
   failedPatternMode: PatternMode;
   failedChangeCategory: boolean;
   metadataMaxStrikes: number | null;
+  aiImportEnabled: boolean;
+  aiImportOllamaUrl: string;
+  aiImportModel: string;
+  aiImportTargetMessagePrefix: string;
+  aiImportConfidenceThreshold: number | null;
+  aiImportTimeoutSeconds: number | null;
+  aiImportTickBudgetSeconds: number | null;
+  aiImportBreakerFailureThreshold: number | null;
+  aiImportBreakerCooldownMinutes: number | null;
+  aiImportSkipBudget: number | null;
+  aiImportDecisionCacheTtlHours: number | null;
 }
 
 @Component({
@@ -109,6 +120,17 @@ export class QueueCleanerComponent implements HasPendingChanges {
     failedPatternMode: PatternMode.Exclude,
     failedChangeCategory: false,
     metadataMaxStrikes: 3,
+    aiImportEnabled: false,
+    aiImportOllamaUrl: '',
+    aiImportModel: '',
+    aiImportTargetMessagePrefix: 'Found matching series via grab history',
+    aiImportConfidenceThreshold: 75,
+    aiImportTimeoutSeconds: 8,
+    aiImportTickBudgetSeconds: 30,
+    aiImportBreakerFailureThreshold: 5,
+    aiImportBreakerCooldownMinutes: 15,
+    aiImportSkipBudget: 3,
+    aiImportDecisionCacheTtlHours: 24,
   });
 
   readonly failedSubFieldsDisabled = computed(() => this.model().failedMaxStrikes === 0);
@@ -155,6 +177,34 @@ export class QueueCleanerComponent implements HasPendingChanges {
     disabled(p.failedSkipNotFound, () => this.model().failedMaxStrikes === 0);
     disabled(p.failedPatternMode, () => this.model().failedMaxStrikes === 0);
     disabled(p.failedPatterns, () => this.model().failedMaxStrikes === 0);
+
+    required(p.aiImportTargetMessagePrefix, { message: 'This field is required' });
+    validate(p.aiImportTargetMessagePrefix, ({ value }) => {
+      return value().trim() === '' ? { kind: 'required', message: 'This field is required' } : undefined;
+    });
+
+    required(p.aiImportConfidenceThreshold, { message: 'This field is required' });
+    min(p.aiImportConfidenceThreshold, 50, { message: 'Value must be at least 50' });
+    max(p.aiImportConfidenceThreshold, 100, { message: 'Value cannot exceed 100' });
+
+    required(p.aiImportTimeoutSeconds, { message: 'This field is required' });
+    min(p.aiImportTimeoutSeconds, 3, { message: 'Value must be at least 3' });
+    max(p.aiImportTimeoutSeconds, 30, { message: 'Value cannot exceed 30' });
+
+    required(p.aiImportTickBudgetSeconds, { message: 'This field is required' });
+    min(p.aiImportTickBudgetSeconds, 1, { message: 'Value must be at least 1' });
+
+    required(p.aiImportBreakerFailureThreshold, { message: 'This field is required' });
+    min(p.aiImportBreakerFailureThreshold, 1, { message: 'Value must be at least 1' });
+
+    required(p.aiImportBreakerCooldownMinutes, { message: 'This field is required' });
+    min(p.aiImportBreakerCooldownMinutes, 1, { message: 'Value must be at least 1' });
+
+    required(p.aiImportSkipBudget, { message: 'This field is required' });
+    min(p.aiImportSkipBudget, 0, { message: 'Value cannot be negative' });
+
+    required(p.aiImportDecisionCacheTtlHours, { message: 'This field is required' });
+    min(p.aiImportDecisionCacheTtlHours, 1, { message: 'Value must be at least 1' });
   });
 
   readonly scheduleIntervalOptions = computed(() => {
@@ -165,6 +215,7 @@ export class QueueCleanerComponent implements HasPendingChanges {
   // UI-only expansion state
   readonly failedExpanded = signal(true);
   readonly metadataExpanded = signal(false);
+  readonly aiImportExpanded = signal(false);
 
   // Stall rules
   readonly stallRules = computed(() => this.stallRulesResource.value());
@@ -233,6 +284,17 @@ export class QueueCleanerComponent implements HasPendingChanges {
           failedPatternMode: config.failedImport.patternMode ?? PatternMode.Exclude,
           failedChangeCategory: config.failedImport.changeCategory ?? false,
           metadataMaxStrikes: config.downloadingMetadataMaxStrikes,
+          aiImportEnabled: config.aiImport.enabled,
+          aiImportOllamaUrl: config.aiImport.ollamaUrl ?? '',
+          aiImportModel: config.aiImport.model ?? '',
+          aiImportTargetMessagePrefix: config.aiImport.targetMessagePrefix ?? 'Found matching series via grab history',
+          aiImportConfidenceThreshold: config.aiImport.confidenceThreshold,
+          aiImportTimeoutSeconds: config.aiImport.timeoutSeconds,
+          aiImportTickBudgetSeconds: config.aiImport.tickBudgetSeconds,
+          aiImportBreakerFailureThreshold: config.aiImport.breakerFailureThreshold,
+          aiImportBreakerCooldownMinutes: config.aiImport.breakerCooldownMinutes,
+          aiImportSkipBudget: config.aiImport.skipBudget,
+          aiImportDecisionCacheTtlHours: config.aiImport.decisionCacheTtlHours,
         });
         this.savedSnapshot.set(this.buildSnapshot());
       });
@@ -369,6 +431,19 @@ export class QueueCleanerComponent implements HasPendingChanges {
         patterns: m.failedPatterns,
         patternMode: m.failedPatternMode,
         changeCategory: m.failedChangeCategory,
+      },
+      aiImport: {
+        enabled: m.aiImportEnabled,
+        confidenceThreshold: m.aiImportConfidenceThreshold ?? 75,
+        timeoutSeconds: m.aiImportTimeoutSeconds ?? 8,
+        tickBudgetSeconds: m.aiImportTickBudgetSeconds ?? 30,
+        breakerFailureThreshold: m.aiImportBreakerFailureThreshold ?? 5,
+        breakerCooldownMinutes: m.aiImportBreakerCooldownMinutes ?? 15,
+        skipBudget: m.aiImportSkipBudget ?? 3,
+        decisionCacheTtlHours: m.aiImportDecisionCacheTtlHours ?? 24,
+        ollamaUrl: m.aiImportOllamaUrl,
+        model: m.aiImportModel,
+        targetMessagePrefix: m.aiImportTargetMessagePrefix,
       },
       downloadingMetadataMaxStrikes: m.metadataMaxStrikes ?? 3,
     };

@@ -383,6 +383,12 @@ public class SonarrClient : ArrClient, ISonarrClient
     /// <item>An idempotency cache hit for this <c>DownloadId</c> + <c>instance.Url</c> (a prior
     /// <see cref="AiImportOutcome.Imported"/> outcome), or the consecutive-skip budget for this
     /// download has been exhausted.</item>
+    /// <item>The series lookup (<see cref="GetSeriesAsync"/>) fails.</item>
+    /// <item>A deterministic token-overlap pre-filter (<see cref="HasTokenOverlap"/>): the release
+    /// title must share at least one significant token with the series title or one of its
+    /// aliases. This is a cheap, defense-in-depth sanity check that runs before ever spending an
+    /// Ollama call - it does not replace the classification, it only rules out releases with
+    /// essentially zero textual relationship to the assigned series.</item>
     /// </list>
     /// Only once every guard above has passed does this method call Ollama. After classification,
     /// if <c>Confidence</c> is below <see cref="AiImportConfig.ConfidenceThreshold"/> the record
@@ -455,12 +461,19 @@ public class SonarrClient : ArrClient, ISonarrClient
 
         if (consecutiveSkips >= aiImportConfig.SkipBudget)
         {
-            _logger.LogWarning(
-                "AI-assisted import skip budget exhausted | {skipBudget} consecutive skips | {downloadId} | {title}",
-                aiImportConfig.SkipBudget,
-                record.DownloadId,
-                record.Title
-            );
+            string skipBudgetWarnedKey = AiImportSkipBudgetWarnedCacheKey(record.DownloadId, instance.Url);
+
+            if (!_cache.TryGetValue(skipBudgetWarnedKey, out bool _))
+            {
+                _logger.LogWarning(
+                    "AI-assisted import skip budget exhausted | {skipBudget} consecutive skips | {downloadId} | {title}",
+                    aiImportConfig.SkipBudget,
+                    record.DownloadId,
+                    record.Title
+                );
+                _cache.Set(skipBudgetWarnedKey, true, Constants.DefaultCacheEntryOptions);
+            }
+
             return AiImportOutcome.Skipped;
         }
 
@@ -473,10 +486,39 @@ public class SonarrClient : ArrClient, ISonarrClient
             return AiImportOutcome.Skipped;
         }
 
+        if (!HasTokenOverlap(record.Title, series.Title, series.AlternateTitles))
+        {
+            _logger.LogInformation(
+                "skip AI-assisted import | release title has no token overlap with series title/aliases | {title} | {seriesTitle}",
+                record.Title,
+                series.Title
+            );
+            RecordAiImportSkip(skipCounterKey, consecutiveSkips);
+            return AiImportOutcome.Skipped;
+        }
+
+        List<Episode>? episodes = await GetEpisodesAsync(instance, [record.EpisodeId]);
+        Episode? episode = episodes?.FirstOrDefault(x => x.Id == record.EpisodeId);
+
+        if (episode is null)
+        {
+            _logger.LogDebug(
+                "AI-assisted import episode lookup failed | falling back to series-level classification only | {name}",
+                record.Title
+            );
+        }
+
         OllamaClassificationResponse response = await _ollamaClient.ClassifyAsync(
             record.Title,
             series.Title,
             series.AlternateTitles.Select(x => x.Title).ToList(),
+            series.Year is not 0 ? series.Year : null,
+            episode?.Title,
+            episode?.AirDate,
+            series.Runtime is not 0 ? series.Runtime : null,
+            episode?.SeasonNumber,
+            episode?.EpisodeNumber,
+            episode?.AbsoluteEpisodeNumber,
             CancellationToken.None
         );
 
@@ -491,6 +533,7 @@ public class SonarrClient : ArrClient, ISonarrClient
         // Any successful classification response - matched or not - resets the consecutive-skip
         // counter: the skip budget only tracks Ollama unavailability, not classification outcome.
         _cache.Remove(skipCounterKey);
+        _cache.Remove(AiImportSkipBudgetWarnedCacheKey(record.DownloadId, instance.Url));
 
         if (!result.Match || result.Confidence < aiImportConfig.ConfidenceThreshold)
         {
@@ -534,6 +577,60 @@ public class SonarrClient : ArrClient, ISonarrClient
         return AiImportOutcome.Imported;
     }
 
+    /// <summary>
+    /// A cheap, deterministic sanity check that <paramref name="releaseTitle"/> shares at least
+    /// one significant token with <paramref name="seriesTitle"/> or one of <paramref name="aliases"/>.
+    /// </summary>
+    /// <remarks>
+    /// This is defense-in-depth, not a replacement for the Ollama classification: it only rules
+    /// out releases with essentially zero textual relationship to the assigned series, guarding
+    /// against wasting an Ollama call (and, as a safety net, against an occasional confident
+    /// misfire from the model) on an obviously-irrelevant candidate. Matching is exact-token only
+    /// after normalisation (lowercase, non-alphanumeric characters - including the "." release
+    /// titles use as a word separator - treated as token boundaries); it does NOT account for
+    /// transliteration/spelling variants of the same word (e.g. "Kokaku" vs "Koukaku" are
+    /// different tokens and will NOT be considered overlapping by this method alone - such cases
+    /// rely on the Ollama classification itself, which the caller invokes only after this filter
+    /// passes). Tokens of length 2 or less are excluded as insignificant (season/episode markers
+    /// like "s01"/"e06" and short connector words are still long enough to match deliberately,
+    /// but this is not a fuzzy-matching library and does not claim precision here).
+    /// </remarks>
+    private static bool HasTokenOverlap(string releaseTitle, string seriesTitle, IReadOnlyList<SeriesAlternateTitle> aliases)
+    {
+        HashSet<string> releaseTokens = Tokenize(releaseTitle);
+
+        if (releaseTokens.Count is 0)
+        {
+            return false;
+        }
+
+        if (releaseTokens.Overlaps(Tokenize(seriesTitle)))
+        {
+            return true;
+        }
+
+        foreach (SeriesAlternateTitle alias in aliases)
+        {
+            if (releaseTokens.Overlaps(Tokenize(alias.Title)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static HashSet<string> Tokenize(string value)
+    {
+        return value
+            .ToLowerInvariant()
+            .Split(NonTokenCharacters, StringSplitOptions.RemoveEmptyEntries)
+            .Where(token => token.Length > 2)
+            .ToHashSet();
+    }
+
+    private static readonly char[] NonTokenCharacters = " .-_()[]{}!,:;'\"".ToCharArray();
+
     private void RecordAiImportSkip(string skipCounterKey, int currentSkips) =>
         _cache.Set(skipCounterKey, currentSkips + 1, Constants.DefaultCacheEntryOptions);
 
@@ -542,6 +639,9 @@ public class SonarrClient : ArrClient, ISonarrClient
 
     private static string AiImportSkipCounterCacheKey(string downloadId, Uri instanceUrl) =>
         $"ai_import_skips_{downloadId.ToLowerInvariant()}_{instanceUrl}";
+
+    private static string AiImportSkipBudgetWarnedCacheKey(string downloadId, Uri instanceUrl) =>
+        $"ai_import_skip_budget_warned_{downloadId.ToLowerInvariant()}_{instanceUrl}";
 
     /// <summary>
     /// Attempts a manual import for a queue record via Sonarr's manual-import candidate list and
