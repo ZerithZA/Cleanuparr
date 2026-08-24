@@ -1,0 +1,112 @@
+{
+  "_fixtureNote": "Real GET /api/v3/manualimport?downloadId={id} response captured against the user's live Sonarr instance (192.168.1.18:8989) on 2026-08-23, as part of Step 0 of the ollama-assisted-import plan (Deliverable 2). downloadId is 62ad6b32-0eff-449c-9cab-85565aa59ed6, the SAME real queue record referenced by the plan as its canonical example (Resident Alien S03E02), which carries 'Found matching series via grab history...' and episodeHasFile: true in the live queue capture. CONFIRMED: the downloadId query parameter IS accepted and DOES return the candidate file(s) for that download (HTTP 200, one candidate). This means the stop-and-replan trigger from the plan does NOT fire - the manual-import approach is viable as designed. Endpoint source-verified against Sonarr/Sonarr on GitHub: Sonarr.Api.V3/ManualImport/ManualImportController.cs GetMediaFiles(string folder, string downloadId, int? seriesId, int? seasonNumber, bool filterExistingFiles = true) - downloadId is a first-class supported filter, independent of seriesId. IMPORTANT for the episodeHasFile:true case: the returned candidate's nested episodes[0].hasFile is true (Sonarr already has a file for this episode) and rejections is an EMPTY array - the candidate-list GET does not surface any warning/rejection about the existing file. Sonarr's overwrite/reject/duplicate decision for this case is therefore NOT visible at the candidate-list stage; it can only be determined by actually issuing the import command (POST /api/v3/command with name=ManualImport), which this Step 0 spike is explicitly forbidden from doing. This remains an open question for the plan to account for explicitly (e.g. treat episodeHasFile:true as its own guarded case, which the plan's Step 5c guard 8 already does by returning FallThrough without importing).",
+  "request": {
+    "method": "GET",
+    "url": "http://192.168.1.18:8989/api/v3/manualimport",
+    "queryParams": {
+      "downloadId": "62ad6b32-0eff-449c-9cab-85565aa59ed6"
+    },
+    "headers": {
+      "X-Api-Key": "<redacted>"
+    }
+  },
+  "response": {
+    "statusCode": 200,
+    "body": [
+      {
+        "path": "/mnt/sabnzbd/downloads/nzb/tv/Resident Alien [2024] S03E02 Ustunluk 1080p Netflix.WEBDL H264 EAC3 TSRG/Resident Alien (2024) S03E02 Üstünlük 1080p Netflix  WEBDL H264 EAC3 @TSRG.mkv",
+        "relativePath": "Resident Alien (2024) S03E02 Üstünlük 1080p Netflix  WEBDL H264 EAC3 @TSRG.mkv",
+        "folderName": "Resident Alien [2024] S03E02 Ustunluk 1080p Netflix.WEBDL H264 EAC3 TSRG",
+        "name": "Resident Alien (2024) S03E02 Üstünlük 1080p Netflix  WEBDL H264 EAC3 @TSRG",
+        "size": 2066789154,
+        "series": {
+          "title": "Resident Alien",
+          "sortTitle": "resident alien",
+          "status": "ended",
+          "ended": true,
+          "overview": "A crash-landed alien named Harry takes on the identity of a small-town Colorado doctor and slowly begins to wrestle with the moral dilemma of his secret mission on Earth.",
+          "network": "SYFY",
+          "airTime": "23:00",
+          "images": [
+            { "coverType": "banner", "remoteUrl": "https://artworks.thetvdb.com/banners/series/368166/banners/5fe26dbd0605c.jpg" },
+            { "coverType": "poster", "remoteUrl": "https://artworks.thetvdb.com/banners/v4/series/368166/posters/61f2d06533a24.jpg" },
+            { "coverType": "fanart", "remoteUrl": "https://artworks.thetvdb.com/banners/series/368166/backgrounds/600744be89ab1.jpg" },
+            { "coverType": "clearlogo", "remoteUrl": "https://artworks.thetvdb.com/banners/v4/series/368166/clearlogo/611c170a14dff.png" }
+          ],
+          "originalLanguage": { "id": 1, "name": "English" },
+          "seasons": [
+            { "seasonNumber": 1, "monitored": true },
+            { "seasonNumber": 2, "monitored": true },
+            { "seasonNumber": 3, "monitored": true },
+            { "seasonNumber": 4, "monitored": true }
+          ],
+          "year": 2021,
+          "path": "/mnt/library/tv/Resident Alien (2021)",
+          "qualityProfileId": 7,
+          "seasonFolder": true,
+          "monitored": true,
+          "monitorNewItems": "all",
+          "useSceneNumbering": false,
+          "runtime": 44,
+          "tvdbId": 368166,
+          "tvRageId": 0,
+          "tvMazeId": 36947,
+          "tmdbId": 96580,
+          "firstAired": "2021-01-27T00:00:00Z",
+          "lastAired": "2025-08-08T00:00:00Z",
+          "seriesType": "standard",
+          "cleanTitle": "residentalien",
+          "imdbId": "tt8690918",
+          "titleSlug": "resident-alien",
+          "certification": "TV-14",
+          "genres": ["Comedy", "Drama", "Mystery", "Science Fiction"],
+          "tags": [8, 11, 18, 21, 31],
+          "added": "2024-02-28T02:55:44Z",
+          "ratings": { "votes": 90880, "value": 8.0 },
+          "languageProfileId": 1,
+          "id": 1781
+        },
+        "seasonNumber": 3,
+        "episodes": [
+          {
+            "seriesId": 1781,
+            "tvdbId": 10256280,
+            "episodeFileId": 1110677,
+            "seasonNumber": 3,
+            "episodeNumber": 2,
+            "title": "The Upper Hand",
+            "airDate": "2024-02-21",
+            "airDateUtc": "2024-02-22T04:00:00Z",
+            "lastSearchTime": "2025-07-07T13:52:04Z",
+            "runtime": 44,
+            "overview": "D’Arcy inserts herself into Harry’s mission, while Kate grows more uncomfortable in her own home.",
+            "hasFile": true,
+            "monitored": true,
+            "unverifiedSceneNumbering": false,
+            "id": 91707
+          }
+        ],
+        "quality": {
+          "quality": { "id": 3, "name": "WEBDL-1080p", "source": "web", "resolution": 1080 },
+          "revision": { "version": 1, "real": 0, "isRepack": false }
+        },
+        "languages": [
+          { "id": 1, "name": "English" },
+          { "id": 17, "name": "Turkish" }
+        ],
+        "qualityWeight": 13,
+        "downloadId": "62ad6b32-0eff-449c-9cab-85565aa59ed6",
+        "customFormats": [
+          { "id": 1, "name": "English" },
+          { "id": 21, "name": "NF" },
+          { "id": 64, "name": "No-RlsGroup" }
+        ],
+        "customFormatScore": 10060,
+        "indexerFlags": 0,
+        "releaseType": "singleEpisode",
+        "rejections": [],
+        "id": 270091784
+      }
+    ]
+  }
+}

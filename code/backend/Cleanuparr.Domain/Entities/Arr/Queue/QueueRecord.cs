@@ -23,6 +23,11 @@ public sealed record QueueRecord
     public long SeasonNumber { get; init; }
 
     /// <summary>
+    /// Whether the episode already has a file.
+    /// </summary>
+    public bool EpisodeHasFile { get; init; }
+
+    /// <summary>
     /// The data about the series.
     /// </summary>
     public QueueSeries? Series { get; init; }

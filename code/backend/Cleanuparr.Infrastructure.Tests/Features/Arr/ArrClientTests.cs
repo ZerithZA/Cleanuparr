@@ -686,6 +686,189 @@ public class ArrClientTests
 
     #endregion
 
+    #region IsFailedImportCandidate (AC-40)
+
+    public static IEnumerable<object[]> IsFailedImportCandidateTruthTable()
+    {
+        string[] trackedStatuses = { "warning", "ok" };
+        string[] trackedStates = { "importBlocked", "importPending", "importFailed", "downloading", "other" };
+        string[] statuses = { "failed", "completed", "other" };
+        InstanceType[] instanceTypes = { InstanceType.Lidarr, InstanceType.Sonarr };
+        string?[] statusMessages = { "Unable to import automatically, please try again", "some other message", null };
+
+        foreach (string trackedStatus in trackedStatuses)
+        foreach (string trackedState in trackedStates)
+        foreach (string status in statuses)
+        foreach (InstanceType instanceType in instanceTypes)
+        foreach (string? statusMessage in statusMessages)
+        {
+            yield return new object[] { trackedStatus, trackedState, status, instanceType, statusMessage! };
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(IsFailedImportCandidateTruthTable))]
+    public void IsFailedImportCandidate_MatchesInlinedExpression(
+        string trackedStatus,
+        string trackedState,
+        string status,
+        InstanceType instanceType,
+        string? statusMessage)
+    {
+        // Arrange
+        List<TrackedDownloadStatusMessage>? statusMessages = statusMessage is null
+            ? null
+            : new List<TrackedDownloadStatusMessage> { new() { Title = "status", Messages = [statusMessage] } };
+        var record = BuildRecord(1, status: status, trackedStatus: trackedStatus, trackedState: trackedState, statusMessages: statusMessages);
+
+        // Original inlined boolean expression from ArrClient.ShouldRemoveFromQueue, prior to the
+        // Step 1 extraction into IsFailedImportCandidate.
+        bool HasWarn() => record.TrackedDownloadStatus
+            .Equals("warning", StringComparison.InvariantCultureIgnoreCase);
+        bool IsImportBlocked() => record.TrackedDownloadState
+            .Equals("importBlocked", StringComparison.InvariantCultureIgnoreCase);
+        bool IsImportPending() => record.TrackedDownloadState
+            .Equals("importPending", StringComparison.InvariantCultureIgnoreCase);
+        bool IsImportFailed() => record.TrackedDownloadState
+            .Equals("importFailed", StringComparison.InvariantCultureIgnoreCase);
+        bool IsFailedLidarr() => instanceType is InstanceType.Lidarr &&
+                                 (record.Status.Equals("failed", StringComparison.InvariantCultureIgnoreCase) ||
+                                  record.Status.Equals("completed", StringComparison.InvariantCultureIgnoreCase)) &&
+                                 HasWarn();
+        bool IsDownloading() => record.TrackedDownloadState
+            .Equals("downloading", StringComparison.InvariantCultureIgnoreCase);
+        bool HasFailedImportMessage() => record.StatusMessages
+            ?.Any(statusMsg => statusMsg.Messages
+                ?.Any(message => message.StartsWith("Unable to import automatically", StringComparison.InvariantCultureIgnoreCase)) is true
+            ) is true;
+        bool IsEdgeCase() => IsDownloading() && HasFailedImportMessage();
+
+        bool expected = HasWarn() && (IsImportBlocked() || IsImportPending() || IsImportFailed()) || IsFailedLidarr() || IsEdgeCase();
+
+        // Act
+        bool actual = _client.IsFailedImportCandidatePublic(instanceType, record);
+
+        // Assert
+        actual.ShouldBe(expected);
+    }
+
+    #endregion
+
+    #region ShouldIgnoreForPrivateTracker (AC-44)
+
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(false, false)]
+    public void ShouldIgnoreForPrivateTracker_MatchesInlinedExpression(bool ignorePrivate, bool isPrivateDownload)
+    {
+        // Arrange
+        var config = new QueueCleanerConfig
+        {
+            FailedImport = new FailedImportConfig { IgnorePrivate = ignorePrivate, MaxStrikes = 3, PatternMode = PatternMode.Exclude },
+        };
+        bool expected = config.FailedImport.IgnorePrivate && isPrivateDownload;
+
+        // Act
+        bool actual = _client.ShouldIgnoreForPrivateTrackerPublic(config, isPrivateDownload);
+
+        // Assert
+        actual.ShouldBe(expected);
+    }
+
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(false, false)]
+    public async Task ShouldRemoveFromQueue_PrivateTrackerDecision_MatchesSharedHelper(bool ignorePrivate, bool isPrivateDownload)
+    {
+        // Arrange — cross-call-site agreement: ShouldRemoveFromQueue's private-tracker short-circuit
+        // must match ShouldIgnoreForPrivateTracker for the same (config, isPrivateDownload) pair.
+        var config = new QueueCleanerConfig
+        {
+            FailedImport = new FailedImportConfig { IgnorePrivate = ignorePrivate, MaxStrikes = 3, PatternMode = PatternMode.Exclude },
+        };
+        SetQueueCleanerConfig(config);
+        // Record shaped so that, absent the private-tracker guard, it WOULD strike — isolating the
+        // private-tracker decision as the only variable under test.
+        var record = BuildRecord(1, trackedStatus: "warning", trackedState: "importBlocked",
+            statusMessages: new List<TrackedDownloadStatusMessage>
+            {
+                new() { Title = "failed", Messages = ["import error"] },
+            });
+        _striker.StrikeAndCheckLimit(record.DownloadId, record.Title, Arg.Any<ushort>(), StrikeType.FailedImport)
+            .Returns(true);
+
+        bool expectedIgnored = _client.ShouldIgnoreForPrivateTrackerPublic(config, isPrivateDownload);
+
+        // Act
+        var result = await _client.ShouldRemoveFromQueue(InstanceType.Sonarr, record, isPrivateDownload, arrMaxStrikes: -1);
+
+        // Assert
+        if (expectedIgnored)
+        {
+            result.ShouldBeFalse();
+            await _striker.DidNotReceive().StrikeAndCheckLimit(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<ushort>(), Arg.Any<StrikeType>(), Arg.Any<long?>());
+        }
+        else
+        {
+            result.ShouldBeTrue();
+        }
+    }
+
+    #endregion
+
+    #region Enum ordinal and mock inertness (AC-41, AC-42)
+
+    // AC-41: default(AiImportOutcome) must be Skipped, pinned at ordinal 0. NSubstitute returns
+    // default(T) for an unstubbed Task<T>-returning member, and 115 IArrClient-shaped mock sites
+    // across the suite depend on that default being the inert outcome. Written before the enum
+    // existed, per the plan; kept here permanently as a regression guard against a future reorder.
+    [Fact]
+    public void AiImportOutcome_DefaultValue_IsSkippedAtOrdinalZero()
+    {
+        default(Cleanuparr.Infrastructure.Features.Ollama.AiImportOutcome)
+            .ShouldBe(Cleanuparr.Infrastructure.Features.Ollama.AiImportOutcome.Skipped);
+        ((int)Cleanuparr.Infrastructure.Features.Ollama.AiImportOutcome.Skipped).ShouldBe(0);
+    }
+
+    // AC-42: exercises the actual mocking library against the actual interfaces, rather than
+    // reasoning about ArrClient's base implementation (which a bare interface mock never sees).
+    [Fact]
+    public async Task TryAiAssistedImportAsync_UnstubbedArrClientMock_ReturnsSkipped()
+    {
+        var mock = Substitute.For<Cleanuparr.Infrastructure.Features.Arr.Interfaces.IArrClient>();
+
+        var result = await mock.TryAiAssistedImportAsync(_arrInstance, BuildRecord(1), isPrivateDownload: false);
+
+        result.ShouldBe(Cleanuparr.Infrastructure.Features.Ollama.AiImportOutcome.Skipped);
+    }
+
+    [Fact]
+    public async Task TryAiAssistedImportAsync_UnstubbedSonarrClientMock_ReturnsSkipped()
+    {
+        var mock = Substitute.For<Cleanuparr.Infrastructure.Features.Arr.Interfaces.ISonarrClient>();
+
+        var result = await mock.TryAiAssistedImportAsync(_arrInstance, BuildRecord(1), isPrivateDownload: false);
+
+        result.ShouldBe(Cleanuparr.Infrastructure.Features.Ollama.AiImportOutcome.Skipped);
+    }
+
+    // Distinct mechanism from AC-42: this proves ArrClient's own virtual base implementation
+    // returns Skipped for a real (non-mock) subclass that does not override the method - protects
+    // concrete subclasses, not mocks. Neither mechanism substitutes for the other.
+    [Fact]
+    public async Task TryAiAssistedImportAsync_BaseArrClientImplementation_ReturnsSkipped()
+    {
+        var result = await _client.TryAiAssistedImportAsync(_arrInstance, BuildRecord(1), isPrivateDownload: false);
+
+        result.ShouldBe(Cleanuparr.Infrastructure.Features.Ollama.AiImportOutcome.Skipped);
+    }
+
+    #endregion
+
     #region Helpers
 
     private static void SetQueueCleanerConfig(QueueCleanerConfig config)
@@ -753,5 +936,11 @@ public class ArrClientTests
         public override bool HasContentId(QueueRecord record) => true;
 
         public override Task<List<Tag>> GetAllTagsAsync(ArrInstance arrInstance) => Task.FromResult(new List<Tag>());
+
+        public bool ShouldIgnoreForPrivateTrackerPublic(QueueCleanerConfig config, bool isPrivateDownload) =>
+            ShouldIgnoreForPrivateTracker(config, isPrivateDownload);
+
+        public bool IsFailedImportCandidatePublic(InstanceType instanceType, QueueRecord record) =>
+            IsFailedImportCandidate(instanceType, record);
     }
 }

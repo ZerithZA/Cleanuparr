@@ -1,0 +1,23 @@
+{
+  "_fixtureNote": "Raw response from the FIRST /api/chat call in this Step 0 session, when Ollama had to load the llama3.2:3b model from disk into GPU memory before it could run inference. Same request body as chat-structured-output-match.json (see that fixture for the request). Kept as a separate fixture purely to document the cold-start risk for TimeoutSeconds budgeting - this is NOT the request/response pair to use for happy-path parsing tests (use chat-structured-output-match.json for that). Wall clock: 49053ms (~49s), almost 6x the plan's default 8s TimeoutSeconds. Breakdown from the response: load_duration=27107968921ns (~27.1s), prompt_eval_duration=17519771000ns (~17.5s), eval_duration=4206912000ns (~4.2s). Ollama's default keep_alive unloads an idle model after 5 minutes, so any request arriving after an idle period can hit this cold-start cost. Implication for Step 3 (OllamaClient/IAiImportBudget): a per-request CancellationTokenSource at 8s will routinely cancel cold-start requests; this should be treated as an expected, non-error FallThrough outcome, not surfaced as a bug. Consider recommending operators configure Ollama's OLLAMA_KEEP_ALIVE to a longer duration, or accept that the very first classification after idle periods will predictably time out.",
+  "response": {
+    "statusCode": 200,
+    "wallClockMs": 49053,
+    "body": {
+      "model": "llama3.2:3b",
+      "created_at": "2026-08-23T20:50:12.65827135Z",
+      "message": {
+        "role": "assistant",
+        "content": "{\"match\": true, \"confidence\": 1, \"reasoning\": \"Series title and aliases match the release title format.\"}"
+      },
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 48838232026,
+      "load_duration": 27107968921,
+      "prompt_eval_count": 147,
+      "prompt_eval_duration": 17519771000,
+      "eval_count": 28,
+      "eval_duration": 4206912000
+    }
+  }
+}

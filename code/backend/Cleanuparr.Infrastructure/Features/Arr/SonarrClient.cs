@@ -5,11 +5,16 @@ using Cleanuparr.Domain.Entities.Arr.Queue;
 using Cleanuparr.Domain.Entities.Sonarr;
 using Cleanuparr.Domain.Enums;
 using Cleanuparr.Infrastructure.Features.Arr.Interfaces;
+using Cleanuparr.Infrastructure.Features.Context;
 using Cleanuparr.Infrastructure.Features.ItemStriker;
+using Cleanuparr.Infrastructure.Features.Ollama;
+using Cleanuparr.Infrastructure.Helpers;
 using Cleanuparr.Infrastructure.Interceptors;
 using Cleanuparr.Persistence.Models.Configuration.Arr;
+using Cleanuparr.Persistence.Models.Configuration.QueueCleaner;
 using System.Text.Json;
 using Cleanuparr.Infrastructure.Json;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Series = Cleanuparr.Domain.Entities.Sonarr.Series;
 
@@ -17,15 +22,25 @@ namespace Cleanuparr.Infrastructure.Features.Arr;
 
 public class SonarrClient : ArrClient, ISonarrClient
 {
+    private readonly IOllamaClient _ollamaClient;
+    private readonly IAiImportBudget _aiImportBudget;
+    private readonly IMemoryCache _cache;
+
     public SonarrClient(
         ILogger<SonarrClient> logger,
         IHttpClientFactory httpClientFactory,
         IStriker striker,
-        IDryRunInterceptor dryRunInterceptor
+        IDryRunInterceptor dryRunInterceptor,
+        IOllamaClient ollamaClient,
+        IAiImportBudget aiImportBudget,
+        IMemoryCache cache
     ) : base(logger, httpClientFactory, striker, dryRunInterceptor)
     {
+        _ollamaClient = ollamaClient;
+        _aiImportBudget = aiImportBudget;
+        _cache = cache;
     }
-    
+
     protected override string GetSystemStatusUrlPath()
     {
         return "/api/v3/system/status";
@@ -325,7 +340,7 @@ public class SonarrClient : ArrClient, ISonarrClient
         return await DeserializeStreamAsync<List<Episode>>(response);
     }
 
-    private async Task<Series?> GetSeriesAsync(ArrInstance arrInstance, long seriesId)
+    protected async Task<Series?> GetSeriesAsync(ArrInstance arrInstance, long seriesId)
     {
         UriBuilder uriBuilder = new(arrInstance.Url);
         uriBuilder.Path = $"{uriBuilder.Path.TrimEnd('/')}/api/v3/series/{seriesId}";
@@ -337,6 +352,285 @@ public class SonarrClient : ArrClient, ISonarrClient
         response.EnsureSuccessStatusCode();
 
         return await DeserializeStreamAsync<Series>(response);
+    }
+
+    /// <summary>
+    /// Attempts an AI-assisted manual import for a queue record stuck with the AI-import target
+    /// status message (<see cref="AiImportConfig.TargetMessagePrefix"/>).
+    /// </summary>
+    /// <remarks>
+    /// Guard order is deliberate and load-bearing (plan Step 5c) - each guard is an early return
+    /// of <see cref="AiImportOutcome.Skipped"/>, cheapest/most-general first:
+    /// <list type="number">
+    /// <item>Not a Sonarr instance.</item>
+    /// <item>Concrete type is not exactly <see cref="SonarrClient"/> (blocks <c>WhisparrV2Client</c>
+    /// and <c>SportarrClient</c>, which both derive from this class).</item>
+    /// <item>The feature is disabled.</item>
+    /// <item>The download is on a private tracker the config says to ignore
+    /// (shared <see cref="ArrClient.ShouldIgnoreForPrivateTracker"/> helper, not a re-typed
+    /// predicate).</item>
+    /// <item>The record is not an AI candidate - message-prefix only
+    /// (<see cref="ArrClient.HasAiTargetStatusMessage"/>). Deliberately does not inspect
+    /// <see cref="QueueRecord.TrackedDownloadState"/> in any form: a state term was carried from an
+    /// earlier iteration of this feature as a proxy for candidacy and was found, against a live
+    /// capture, to be exactly inverted for the target record shape - it would have made the gate
+    /// fire for 0% of real records. Do not reintroduce one (AC-48).</item>
+    /// <item>Dry run is enabled (checked only after candidacy, so dry-run logging is limited to
+    /// genuine candidates rather than firing for every non-candidate record).</item>
+    /// <item>The per-tick AI time budget is exhausted or the circuit breaker is open
+    /// (<see cref="IAiImportBudget.CanCallOllama"/>).</item>
+    /// <item>An idempotency cache hit for this <c>DownloadId</c> + <c>instance.Url</c> (a prior
+    /// <see cref="AiImportOutcome.Imported"/> outcome), or the consecutive-skip budget for this
+    /// download has been exhausted.</item>
+    /// </list>
+    /// Only once every guard above has passed does this method call Ollama. After classification,
+    /// if <c>Confidence</c> is below <see cref="AiImportConfig.ConfidenceThreshold"/> the record
+    /// falls through. Then - and only then, deliberately after classification rather than before it
+    /// - if <see cref="QueueRecord.EpisodeHasFile"/> is <see langword="true"/> the classification is
+    /// still logged (so real data accumulates on this record shape) but the import is suppressed and
+    /// this method returns <see cref="AiImportOutcome.FallThrough"/>: Sonarr's behaviour for a
+    /// manual import into an episode that already has a file was never established, so importing
+    /// over an existing file on the strength of a non-deterministic classification is avoided by
+    /// default (AC-50). Otherwise the manual import is attempted.
+    /// </remarks>
+    public override async Task<AiImportOutcome> TryAiAssistedImportAsync(ArrInstance instance, QueueRecord record, bool isPrivateDownload)
+    {
+        if (instance.ArrConfig.Type is not InstanceType.Sonarr)
+        {
+            return AiImportOutcome.Skipped;
+        }
+
+        if (GetType() != typeof(SonarrClient))
+        {
+            // Blocks WhisparrV2Client and SportarrClient, both of which derive from SonarrClient.
+            return AiImportOutcome.Skipped;
+        }
+
+        QueueCleanerConfig queueCleanerConfig = ContextProvider.Get<QueueCleanerConfig>();
+        AiImportConfig aiImportConfig = queueCleanerConfig.AiImport;
+
+        if (!aiImportConfig.Enabled)
+        {
+            return AiImportOutcome.Skipped;
+        }
+
+        if (ShouldIgnoreForPrivateTracker(queueCleanerConfig, isPrivateDownload))
+        {
+            _logger.LogDebug("skip AI-assisted import | download is private | {name}", record.Title);
+            return AiImportOutcome.Skipped;
+        }
+
+        if (!HasAiTargetStatusMessage(record, aiImportConfig.TargetMessagePrefix))
+        {
+            return AiImportOutcome.Skipped;
+        }
+
+        if (await _dryRunInterceptor.IsDryRunEnabled())
+        {
+            _logger.LogInformation(
+                "DRY RUN: would have attempted an AI-assisted import | {downloadId} | {title}",
+                record.DownloadId,
+                record.Title
+            );
+            return AiImportOutcome.Skipped;
+        }
+
+        if (!_aiImportBudget.CanCallOllama())
+        {
+            _logger.LogDebug("skip AI-assisted import | tick budget exhausted or breaker open | {name}", record.Title);
+            return AiImportOutcome.Skipped;
+        }
+
+        string decisionCacheKey = AiImportDecisionCacheKey(record.DownloadId, instance.Url);
+
+        if (_cache.TryGetValue(decisionCacheKey, out AiImportOutcome cachedOutcome) && cachedOutcome is AiImportOutcome.Imported)
+        {
+            _logger.LogDebug("skip AI-assisted import | already imported this tick window | {name}", record.Title);
+            return AiImportOutcome.Skipped;
+        }
+
+        string skipCounterKey = AiImportSkipCounterCacheKey(record.DownloadId, instance.Url);
+        int consecutiveSkips = _cache.TryGetValue(skipCounterKey, out int existingSkips) ? existingSkips : 0;
+
+        if (consecutiveSkips >= aiImportConfig.SkipBudget)
+        {
+            _logger.LogWarning(
+                "AI-assisted import skip budget exhausted | {skipBudget} consecutive skips | {downloadId} | {title}",
+                aiImportConfig.SkipBudget,
+                record.DownloadId,
+                record.Title
+            );
+            return AiImportOutcome.Skipped;
+        }
+
+        Series? series = await GetSeriesAsync(instance, record.SeriesId);
+
+        if (series is null)
+        {
+            _logger.LogDebug("skip AI-assisted import | series lookup failed | {name}", record.Title);
+            RecordAiImportSkip(skipCounterKey, consecutiveSkips);
+            return AiImportOutcome.Skipped;
+        }
+
+        OllamaClassificationResponse response = await _ollamaClient.ClassifyAsync(
+            record.Title,
+            series.Title,
+            series.AlternateTitles.Select(x => x.Title).ToList(),
+            CancellationToken.None
+        );
+
+        if (response.Outcome is not OllamaClassificationOutcome.Success || response.Result is null)
+        {
+            RecordAiImportSkip(skipCounterKey, consecutiveSkips);
+            return AiImportOutcome.Skipped;
+        }
+
+        OllamaClassificationResult result = response.Result;
+
+        // Any successful classification response - matched or not - resets the consecutive-skip
+        // counter: the skip budget only tracks Ollama unavailability, not classification outcome.
+        _cache.Remove(skipCounterKey);
+
+        if (!result.Match || result.Confidence < aiImportConfig.ConfidenceThreshold)
+        {
+            _logger.LogInformation(
+                "AI-assisted import classification did not meet the confidence threshold | match={match} confidence={confidence} reasoning={reasoning} | {downloadId} | {title}",
+                result.Match,
+                result.Confidence,
+                result.Reasoning,
+                record.DownloadId,
+                record.Title
+            );
+            return AiImportOutcome.FallThrough;
+        }
+
+        if (record.EpisodeHasFile)
+        {
+            // Guard runs AFTER classification, deliberately: the classification is still logged so
+            // real data accumulates on this record shape, but Sonarr's behaviour for a manual
+            // import into an episode that already has a file was never established, so the import
+            // itself is conservatively suppressed (AC-50).
+            _logger.LogInformation(
+                "AI-assisted import classification matched but the episode already has a file, so the import was not performed | match={match} confidence={confidence} reasoning={reasoning} | {downloadId} | {title}",
+                result.Match,
+                result.Confidence,
+                result.Reasoning,
+                record.DownloadId,
+                record.Title
+            );
+            return AiImportOutcome.FallThrough;
+        }
+
+        bool imported = await TryManualImportAsync(instance, record);
+
+        if (!imported)
+        {
+            return AiImportOutcome.FallThrough;
+        }
+
+        _cache.Set(decisionCacheKey, AiImportOutcome.Imported, TimeSpan.FromHours(aiImportConfig.DecisionCacheTtlHours));
+
+        return AiImportOutcome.Imported;
+    }
+
+    private void RecordAiImportSkip(string skipCounterKey, int currentSkips) =>
+        _cache.Set(skipCounterKey, currentSkips + 1, Constants.DefaultCacheEntryOptions);
+
+    private static string AiImportDecisionCacheKey(string downloadId, Uri instanceUrl) =>
+        $"ai_import_{downloadId.ToLowerInvariant()}_{instanceUrl}";
+
+    private static string AiImportSkipCounterCacheKey(string downloadId, Uri instanceUrl) =>
+        $"ai_import_skips_{downloadId.ToLowerInvariant()}_{instanceUrl}";
+
+    /// <summary>
+    /// Attempts a manual import for a queue record via Sonarr's manual-import candidate list and
+    /// the <c>ManualImport</c> command. Assumes the caller has already decided this record is
+    /// eligible for an AI-assisted import (private-tracker and candidacy checks happen upstream).
+    /// </summary>
+    /// <remarks>
+    /// Multi-episode releases are not supported: if the candidate list contains more than one
+    /// importable file for <paramref name="record"/>'s <see cref="QueueRecord.DownloadId"/>, this
+    /// method logs and returns <see langword="false"/> without issuing the import command.
+    /// </remarks>
+    /// <returns><see langword="true"/> if the import command was issued; otherwise <see langword="false"/>.</returns>
+    protected async Task<bool> TryManualImportAsync(ArrInstance arrInstance, QueueRecord record)
+    {
+        UriBuilder candidateListUriBuilder = new(arrInstance.Url);
+        candidateListUriBuilder.Path = $"{candidateListUriBuilder.Path.TrimEnd('/')}/api/v3/manualimport";
+        candidateListUriBuilder.Query = $"downloadId={Uri.EscapeDataString(record.DownloadId)}";
+
+        using HttpRequestMessage candidateListRequest = new(HttpMethod.Get, candidateListUriBuilder.Uri);
+        SetApiKey(candidateListRequest, arrInstance.ApiKey);
+
+        using HttpResponseMessage candidateListResponse = await _httpClient.SendAsync(
+            candidateListRequest,
+            HttpCompletionOption.ResponseHeadersRead);
+        candidateListResponse.EnsureSuccessStatusCode();
+
+        List<SonarrManualImportCandidate> candidates =
+            await DeserializeStreamAsync<List<SonarrManualImportCandidate>>(candidateListResponse) ?? [];
+
+        if (candidates.Count > 1)
+        {
+            _logger.LogInformation(
+                "skip manual import | multi-file releases are unsupported | {count} candidate files | {downloadId} | {title}",
+                candidates.Count,
+                record.DownloadId,
+                record.Title
+            );
+
+            return false;
+        }
+
+        if (candidates.Count is 0)
+        {
+            _logger.LogDebug("skip manual import | no candidate files found | {downloadId} | {title}", record.DownloadId, record.Title);
+
+            return false;
+        }
+
+        SonarrManualImportCandidate candidate = candidates[0];
+
+        SonarrManualImportCommand command = new()
+        {
+            Files =
+            [
+                new SonarrManualImportCommandFile
+                {
+                    Path = candidate.Path,
+                    FolderName = candidate.FolderName,
+                    SeriesId = candidate.SeriesId,
+                    EpisodeIds = candidate.Episodes.Select(x => x.Id).ToList(),
+                    Quality = candidate.Quality,
+                    Languages = candidate.Languages,
+                    ReleaseType = candidate.ReleaseType,
+                    DownloadId = candidate.DownloadId,
+                }
+            ],
+        };
+
+        UriBuilder commandUriBuilder = new(arrInstance.Url);
+        commandUriBuilder.Path = $"{commandUriBuilder.Path.TrimEnd('/')}/api/v3/command";
+
+        using HttpRequestMessage commandRequest = new(HttpMethod.Post, commandUriBuilder.Uri);
+        commandRequest.Content = new StringContent(
+            JsonSerializer.Serialize(command, CleanuparrJsonOptions.Outbound),
+            Encoding.UTF8,
+            "application/json"
+        );
+        SetApiKey(commandRequest, arrInstance.ApiKey);
+
+        HttpResponseMessage? commandResponse = await _dryRunInterceptor.InterceptAsync(() => SendRequestAsync(commandRequest));
+        commandResponse?.Dispose();
+
+        _logger.LogInformation(
+            "manual import triggered | {url} | {downloadId} | {title}",
+            arrInstance.Url,
+            record.DownloadId,
+            record.Title
+        );
+
+        return true;
     }
 
     private List<SonarrCommand> GetSearchCommands(HashSet<SeriesSearchItem> items)

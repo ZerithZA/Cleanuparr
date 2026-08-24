@@ -112,6 +112,59 @@ public class ExternalApiReadTests
     }
 
     [Fact]
+    public void QueueRecord_FromCapturedSonarrPayload_DeserializesEpisodeHasFile()
+    {
+        // Real record captured from a live Sonarr queue response (id 1191304180), where the
+        // matching engine found the series via grab history but could not auto-import because
+        // the release was matched to the series by ID. episodeHasFile: true on the wire must
+        // deserialize to QueueRecord.EpisodeHasFile, not be silently discarded.
+        const string payload = """
+        {
+            "totalRecords": 1,
+            "records": [
+                {
+                    "seriesId": 1781,
+                    "episodeId": 91707,
+                    "seasonNumber": 3,
+                    "customFormatScore": 10060,
+                    "size": 2137048129,
+                    "title": "Resident Alien [2024] S03E02 Ustunluk 1080p Netflix.WEBDL H264 EAC3 TSRG",
+                    "estimatedCompletionTime": "2026-08-23T20:02:02Z",
+                    "added": "2026-07-04T10:46:07Z",
+                    "status": "completed",
+                    "trackedDownloadStatus": "warning",
+                    "trackedDownloadState": "importBlocked",
+                    "statusMessages": [
+                        {
+                            "title": "Resident Alien [2024] S03E02 Ustunluk 1080p Netflix.WEBDL H264 EAC3 TSRG",
+                            "messages": [
+                                "Found matching series via grab history, but release was matched to series by ID. Automatic import is not possible. See the FAQ for details."
+                            ]
+                        }
+                    ],
+                    "errorMessage": "",
+                    "downloadId": "62ad6b32-0eff-449c-9cab-85565aa59ed6",
+                    "protocol": "usenet",
+                    "downloadClient": "SABnzbd",
+                    "downloadClientHasPostImportCategory": false,
+                    "indexer": "NZBHydra",
+                    "outputPath": "/mnt/sabnzbd/downloads/nzb/tv/Resident Alien [2024] S03E02 Ustunluk 1080p Netflix.WEBDL H264 EAC3 TSRG/",
+                    "episodeHasFile": true,
+                    "sizeleft": 0,
+                    "timeleft": "00:00:00",
+                    "id": 1191304180
+                }
+            ]
+        }
+        """;
+
+        QueueListResponse result = JsonSerializer.Deserialize<QueueListResponse>(payload, CleanuparrJsonOptions.ExternalApiRead)!;
+
+        result.Records[0].EpisodeHasFile.ShouldBeTrue();
+        result.Records[0].Id.ShouldBe(1191304180);
+    }
+
+    [Fact]
     public void EmptyQueueResponse_Deserializes()
     {
         QueueListResponse result = JsonSerializer.Deserialize<QueueListResponse>("{}", CleanuparrJsonOptions.ExternalApiRead)!;

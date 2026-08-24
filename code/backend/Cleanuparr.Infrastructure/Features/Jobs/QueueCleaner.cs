@@ -5,6 +5,7 @@ using Cleanuparr.Infrastructure.Features.Arr.Interfaces;
 using Cleanuparr.Infrastructure.Features.Context;
 using Cleanuparr.Infrastructure.Features.DownloadClient;
 using Cleanuparr.Infrastructure.Features.LazyLibrarian;
+using Cleanuparr.Infrastructure.Features.Ollama;
 using Cleanuparr.Infrastructure.Helpers;
 using Cleanuparr.Infrastructure.Interceptors;
 using Cleanuparr.Infrastructure.Services.Interfaces;
@@ -26,6 +27,7 @@ public sealed class QueueCleaner : GenericHandler
 {
     private readonly IConnectivityChecker _connectivityChecker;
     private readonly ILazyLibrarianEvaluator _lazyLibrarianService;
+    private readonly IAiImportBudget _aiImportBudget;
 
     public QueueCleaner(
         ILogger<QueueCleaner> logger,
@@ -38,7 +40,8 @@ public sealed class QueueCleaner : GenericHandler
         IEventPublisher eventPublisher,
         IDryRunInterceptor dryRunInterceptor,
         IConnectivityChecker connectivityChecker,
-        [FromKeyedServices(ILazyLibrarianEvaluator.QueueCleanerKey)] ILazyLibrarianEvaluator lazyLibrarianService
+        [FromKeyedServices(ILazyLibrarianEvaluator.QueueCleanerKey)] ILazyLibrarianEvaluator lazyLibrarianService,
+        IAiImportBudget aiImportBudget
     ) : base(
         logger, dataContext, cache, messageBus,
         arrClientFactory, arrArrQueueIterator, downloadServiceFactory, eventPublisher, dryRunInterceptor
@@ -46,6 +49,7 @@ public sealed class QueueCleaner : GenericHandler
     {
         _connectivityChecker = connectivityChecker;
         _lazyLibrarianService = lazyLibrarianService;
+        _aiImportBudget = aiImportBudget;
     }
 
     protected override async Task ExecuteInternalAsync(CancellationToken cancellationToken = default)
@@ -57,6 +61,11 @@ public sealed class QueueCleaner : GenericHandler
             _logger.LogWarning($"skip {nameof(QueueCleaner)} run | no internet connectivity detected");
             return;
         }
+
+        // Start the per-tick AI import time budget stopwatch once, before any instance is
+        // processed. QueueCleaner ticks never overlap ([DisallowConcurrentExecution] on
+        // GenericJob<T>), so a single process-global stopwatch per tick is well-defined.
+        _aiImportBudget.StartTick();
 
         List<StallRule> stallRules = await _dataContext.StallRules
             .Where(r => r.Enabled)
@@ -246,6 +255,20 @@ public sealed class QueueCleaner : GenericHandler
                 if (isTorrent && hasEnabledTorrentClients && !downloadCheckResult.Found && queueCleanerConfig.FailedImport.SkipIfNotFoundInClient)
                 {
                     _logger.LogInformation("skip | torrent not found in any torrent client | {title}", record.Title);
+                    continue;
+                }
+
+                // AI-assisted import: attempt to recover a record stuck due to a series-by-ID
+                // grab-history mismatch before it is evaluated for strikes/removal. Imported
+                // records are handled by Sonarr's own import completion and must not also be
+                // struck this tick; FallThrough/Skipped fall through to the existing failed
+                // import check unchanged.
+                AiImportOutcome aiImportOutcome = await arrClient
+                    .TryAiAssistedImportAsync(instance, record, downloadCheckResult.IsPrivate);
+
+                if (aiImportOutcome is AiImportOutcome.Imported)
+                {
+                    _logger.LogDebug("skip | AI-assisted import triggered | {title}", record.Title);
                     continue;
                 }
 

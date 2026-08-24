@@ -14,4 +14,10 @@ public sealed record Series
     /// The name of the series.
     /// </summary>
     public string Title { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Alternate titles/aliases Sonarr knows for the series, used to widen AI-assisted
+    /// release-title matching (see <c>IOllamaClient.ClassifyAsync</c>'s <c>seriesAliases</c>).
+    /// </summary>
+    public List<SeriesAlternateTitle> AlternateTitles { get; init; } = [];
 }

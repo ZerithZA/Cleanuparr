@@ -15,6 +15,7 @@ using Cleanuparr.Infrastructure.Features.ItemStriker;
 using Cleanuparr.Infrastructure.Features.Jobs;
 using Cleanuparr.Infrastructure.Features.MalwareBlocker;
 using Cleanuparr.Infrastructure.Features.Notifications;
+using Cleanuparr.Infrastructure.Features.Ollama;
 using Cleanuparr.Infrastructure.Hubs;
 using Cleanuparr.Infrastructure.Interceptors;
 using Cleanuparr.Infrastructure.Tests.Features.Jobs.TestHelpers;
@@ -67,6 +68,7 @@ public class IntegrationTestFixture : IDisposable
     public IUnlinkedDownloadsService UnlinkedService { get; private set; } = null!;
     public IDeadTorrentService DeadTorrentService { get; private set; } = null!;
     public IOrphanedFilesCleanupService OrphanedFilesService { get; private set; } = null!;
+    public IAiImportBudget AiImportBudget { get; private set; }
 
     // State
     public Guid JobRunId { get; private set; }
@@ -93,6 +95,8 @@ public class IntegrationTestFixture : IDisposable
         LazyLibrarianServiceQC = Substitute.For<ILazyLibrarianEvaluator>();
         LazyLibrarianServiceCB = Substitute.For<ILazyLibrarianEvaluator>();
         HubContext = CreateMockHubContext();
+        AiImportBudget = Substitute.For<IAiImportBudget>();
+        AiImportBudget.CanCallOllama().Returns(true);
 
         SetupDefaults();
         BuildRealServices();
@@ -262,6 +266,8 @@ public class IntegrationTestFixture : IDisposable
         NotificationPublisher = Substitute.For<INotificationPublisher>();
         DryRunInterceptor = Substitute.For<IDryRunInterceptor>();
         HubContext = CreateMockHubContext();
+        AiImportBudget = Substitute.For<IAiImportBudget>();
+        AiImportBudget.CanCallOllama().Returns(true);
 
         // Re-setup defaults and rebuild real services
         SetupDefaults();

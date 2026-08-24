@@ -8,6 +8,7 @@ using Cleanuparr.Infrastructure.Features.Arr;
 using Cleanuparr.Infrastructure.Features.Arr.Interfaces;
 using Cleanuparr.Infrastructure.Features.DownloadClient;
 using Cleanuparr.Infrastructure.Features.DownloadRemover.Models;
+using Cleanuparr.Infrastructure.Features.Ollama;
 using Cleanuparr.Infrastructure.Helpers;
 using Cleanuparr.Infrastructure.Services.Interfaces;
 using Cleanuparr.Infrastructure.Tests.Features.Jobs.TestHelpers;
@@ -60,7 +61,8 @@ public class QueueCleanerTests : IDisposable
             _fixture.EventPublisher,
             _fixture.DryRunInterceptor,
             _connectivityChecker,
-            _fixture.LazyLibrarianServiceQC
+            _fixture.LazyLibrarianServiceQC,
+            _fixture.AiImportBudget
         );
     }
 
@@ -755,6 +757,234 @@ public class QueueCleanerTests : IDisposable
             ),
             Arg.Any<CancellationToken>()
         );
+    }
+
+    [Fact]
+    public async Task ProcessInstanceAsync_CallsTryAiAssistedImportBeforeShouldRemoveFromQueue()
+    {
+        // Arrange
+        TestDataContextFactory.AddSonarrInstance(_fixture.DataContext);
+        TestDataContextFactory.AddDownloadClient(_fixture.DataContext);
+
+        var mockArrClient = Substitute.For<IArrClient>();
+        mockArrClient.IsRecordValid(Arg.Any<QueueRecord>()).Returns(true);
+        mockArrClient.HasContentId(Arg.Any<QueueRecord>()).Returns(true);
+        mockArrClient.ShouldRemoveFromQueue(
+            Arg.Any<InstanceType>(),
+            Arg.Any<QueueRecord>(),
+            Arg.Any<bool>(),
+            Arg.Any<short>()
+        ).Returns(false);
+
+        _fixture.ArrClientFactory
+            .GetClient(InstanceType.Sonarr, Arg.Any<float>())
+            .Returns(mockArrClient);
+
+        var queueRecord = new QueueRecord
+        {
+            Id = 1,
+            DownloadId = "usenet-download-id",
+            Title = "Usenet Download",
+            Protocol = "usenet",
+            SeriesId = 1,
+            EpisodeId = 1
+        };
+
+        _fixture.ArrQueueIterator
+            .Iterate(
+                Arg.Any<IArrClient>(),
+                Arg.Any<ArrInstance>(),
+                Arg.Any<Func<IReadOnlyList<QueueRecord>, Task>>()
+            )
+            .Returns(async ci =>
+            {
+                var callback = ci.ArgAt<Func<IReadOnlyList<QueueRecord>, Task>>(2);
+                await callback([queueRecord]);
+            });
+
+        var sut = CreateSut();
+
+        // Act
+        await sut.ExecuteAsync();
+
+        // Assert - AC-45: a usenet record (Protocol not containing "torrent") reaches
+        // TryAiAssistedImportAsync with IsPrivate false by construction, since the
+        // downloadCheckResult population block is skipped for non-torrent records.
+        await mockArrClient.Received(1).TryAiAssistedImportAsync(
+            Arg.Any<ArrInstance>(),
+            queueRecord,
+            isPrivateDownload: false
+        );
+
+        // Assert - AC-43: control-flow equivalence. The existing failed-import check must
+        // still run exactly as before, since this mock leaves TryAiAssistedImportAsync
+        // unstubbed and it auto-returns AiImportOutcome.Skipped (the enum's zero member).
+        await mockArrClient.Received(1).ShouldRemoveFromQueue(
+            InstanceType.Sonarr,
+            queueRecord,
+            false,
+            Arg.Any<short>()
+        );
+    }
+
+    [Fact]
+    public async Task ProcessInstanceAsync_WhenAiImportOutcomeIsImported_SkipsShouldRemoveFromQueue()
+    {
+        // Arrange
+        TestDataContextFactory.AddSonarrInstance(_fixture.DataContext);
+        TestDataContextFactory.AddDownloadClient(_fixture.DataContext);
+
+        var mockArrClient = Substitute.For<IArrClient>();
+        mockArrClient.IsRecordValid(Arg.Any<QueueRecord>()).Returns(true);
+        mockArrClient.HasContentId(Arg.Any<QueueRecord>()).Returns(true);
+        mockArrClient.TryAiAssistedImportAsync(
+            Arg.Any<ArrInstance>(),
+            Arg.Any<QueueRecord>(),
+            Arg.Any<bool>()
+        ).Returns(AiImportOutcome.Imported);
+
+        _fixture.ArrClientFactory
+            .GetClient(InstanceType.Sonarr, Arg.Any<float>())
+            .Returns(mockArrClient);
+
+        var queueRecord = new QueueRecord
+        {
+            Id = 1,
+            DownloadId = "ai-imported-id",
+            Title = "AI Imported Download",
+            Protocol = "usenet",
+            SeriesId = 1,
+            EpisodeId = 1
+        };
+
+        _fixture.ArrQueueIterator
+            .Iterate(
+                Arg.Any<IArrClient>(),
+                Arg.Any<ArrInstance>(),
+                Arg.Any<Func<IReadOnlyList<QueueRecord>, Task>>()
+            )
+            .Returns(async ci =>
+            {
+                var callback = ci.ArgAt<Func<IReadOnlyList<QueueRecord>, Task>>(2);
+                await callback([queueRecord]);
+            });
+
+        var sut = CreateSut();
+
+        // Act
+        await sut.ExecuteAsync();
+
+        // Assert - an Imported outcome must skip the failed-import check entirely for this
+        // tick: Sonarr's own import completion will move the record out of the queue.
+        await mockArrClient.DidNotReceive().ShouldRemoveFromQueue(
+            Arg.Any<InstanceType>(),
+            Arg.Any<QueueRecord>(),
+            Arg.Any<bool>(),
+            Arg.Any<short>()
+        );
+        await _fixture.MessageBus.DidNotReceive().Publish(
+            Arg.Any<QueueItemRemoveRequest>(),
+            Arg.Any<CancellationToken>()
+        );
+    }
+
+    [Fact]
+    public async Task ProcessInstanceAsync_WhenAiImportOutcomeIsFallThrough_RecordAccruesNoStrikesAndIsNotRemoved()
+    {
+        // Arrange - AC-47: FallThrough is a deliberate non-change. The AI path never converts
+        // a classification into strike or delete authority; the record must remain stuck in
+        // the queue exactly as it would on main with the feature entirely absent.
+        TestDataContextFactory.AddSonarrInstance(_fixture.DataContext);
+        TestDataContextFactory.AddDownloadClient(_fixture.DataContext);
+
+        var mockArrClient = Substitute.For<IArrClient>();
+        mockArrClient.IsRecordValid(Arg.Any<QueueRecord>()).Returns(true);
+        mockArrClient.HasContentId(Arg.Any<QueueRecord>()).Returns(true);
+        mockArrClient.TryAiAssistedImportAsync(
+            Arg.Any<ArrInstance>(),
+            Arg.Any<QueueRecord>(),
+            Arg.Any<bool>()
+        ).Returns(AiImportOutcome.FallThrough);
+        mockArrClient.ShouldRemoveFromQueue(
+            Arg.Any<InstanceType>(),
+            Arg.Any<QueueRecord>(),
+            Arg.Any<bool>(),
+            Arg.Any<short>()
+        ).Returns(false);
+
+        _fixture.ArrClientFactory
+            .GetClient(InstanceType.Sonarr, Arg.Any<float>())
+            .Returns(mockArrClient);
+
+        var queueRecord = new QueueRecord
+        {
+            Id = 1,
+            DownloadId = "fall-through-id",
+            Title = "Fall Through Download",
+            Protocol = "usenet",
+            SeriesId = 1,
+            EpisodeId = 1
+        };
+
+        _fixture.ArrQueueIterator
+            .Iterate(
+                Arg.Any<IArrClient>(),
+                Arg.Any<ArrInstance>(),
+                Arg.Any<Func<IReadOnlyList<QueueRecord>, Task>>()
+            )
+            .Returns(async ci =>
+            {
+                var callback = ci.ArgAt<Func<IReadOnlyList<QueueRecord>, Task>>(2);
+                await callback([queueRecord]);
+            });
+
+        var sut = CreateSut();
+
+        // Act
+        await sut.ExecuteAsync();
+
+        // Assert - the existing failed-import check still runs and, per this test's stub,
+        // decides not to remove the record. No strike/removal request is published.
+        await mockArrClient.Received(1).ShouldRemoveFromQueue(
+            InstanceType.Sonarr,
+            queueRecord,
+            false,
+            Arg.Any<short>()
+        );
+        await _fixture.MessageBus.DidNotReceive().Publish(
+            Arg.Any<QueueItemRemoveRequest>(),
+            Arg.Any<CancellationToken>()
+        );
+    }
+
+    [Fact]
+    public async Task ExecuteInternalAsync_StartsAiImportBudgetTickOnce()
+    {
+        // Arrange
+        TestDataContextFactory.AddSonarrInstance(_fixture.DataContext);
+        TestDataContextFactory.AddRadarrInstance(_fixture.DataContext);
+
+        var mockArrClient = Substitute.For<IArrClient>();
+        _fixture.ArrClientFactory
+            .GetClient(Arg.Any<InstanceType>(), Arg.Any<float>())
+            .Returns(mockArrClient);
+
+        _fixture.ArrQueueIterator
+            .Iterate(
+                Arg.Any<IArrClient>(),
+                Arg.Any<ArrInstance>(),
+                Arg.Any<Func<IReadOnlyList<QueueRecord>, Task>>()
+            )
+            .Returns(Task.CompletedTask);
+
+        var sut = CreateSut();
+
+        // Act
+        await sut.ExecuteAsync();
+
+        // Assert - the per-tick AI budget stopwatch starts exactly once per QueueCleaner tick,
+        // not once per arr instance processed.
+        _fixture.AiImportBudget.Received(1).StartTick();
     }
 
     [Fact]
