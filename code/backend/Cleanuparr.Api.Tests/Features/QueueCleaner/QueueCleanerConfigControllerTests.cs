@@ -1,10 +1,13 @@
+using System.Net;
 using Cleanuparr.Api.Features.QueueCleaner.Contracts.Requests;
 using Cleanuparr.Api.Features.QueueCleaner.Controllers;
 using Cleanuparr.Api.Tests.TestHelpers;
 using Cleanuparr.Domain.Enums;
+using Cleanuparr.Infrastructure.Features.Ollama;
 using Cleanuparr.Infrastructure.Services.Interfaces;
 using Cleanuparr.Persistence;
 using Cleanuparr.Persistence.Models.Configuration.QueueCleaner;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
@@ -20,6 +23,8 @@ public class QueueCleanerConfigControllerTests : IDisposable
     private readonly DataContext _dataContext;
     private readonly IJobManagementService _jobManagementService;
     private readonly MemoryCache _memoryCache;
+    private readonly IAiImportBudget _aiImportBudget;
+    private readonly TestHttpMessageHandler _testHttpMessageHandler;
     private readonly QueueCleanerConfigController _controller;
 
     public QueueCleanerConfigControllerTests()
@@ -28,7 +33,12 @@ public class QueueCleanerConfigControllerTests : IDisposable
         var logger = Substitute.For<ILogger<QueueCleanerConfigController>>();
         _jobManagementService = Substitute.For<IJobManagementService>();
         _memoryCache = new MemoryCache(new MemoryCacheOptions());
-        _controller = new QueueCleanerConfigController(logger, _dataContext, _jobManagementService, _memoryCache);
+        _aiImportBudget = Substitute.For<IAiImportBudget>();
+        _testHttpMessageHandler = new TestHttpMessageHandler();
+        var httpClientFactory = Substitute.For<IHttpClientFactory>();
+        httpClientFactory.CreateClient(Arg.Any<string>()).Returns(_ => new HttpClient(_testHttpMessageHandler));
+        _controller = new QueueCleanerConfigController(
+            logger, _dataContext, _jobManagementService, _memoryCache, _aiImportBudget, httpClientFactory);
         ConfigControllerTestDataFactory.ConfigureProblemDetails(_controller);
     }
 
@@ -242,5 +252,75 @@ public class QueueCleanerConfigControllerTests : IDisposable
 
         // Assert — entry is untouched since there was no true -> false transition (it was already false).
         _memoryCache.TryGetValue("ai_import_abc123_http://sonarr:8989/", out object? _).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void ResetAiImportCircuitBreaker_CallsBudgetReset_ReturnsSuccessMessage()
+    {
+        // Act
+        var result = _controller.ResetAiImportCircuitBreaker();
+
+        // Assert
+        result.ShouldBeOfType<OkObjectResult>();
+        _aiImportBudget.Received(1).Reset();
+    }
+
+    [Fact]
+    public async Task TestOllamaConnection_Reachable_ReturnsSuccessWithModelNames()
+    {
+        // Arrange
+        const string responseJson = """
+        {
+          "models": [
+            { "name": "llama3.1:8b" },
+            { "name": "llama3.2:3b" }
+          ]
+        }
+        """;
+        _testHttpMessageHandler.SetupResponse((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(responseJson),
+        }));
+
+        var request = new TestOllamaConnectionRequest { OllamaUrl = "http://localhost:11434" };
+
+        // Act
+        var result = await _controller.TestOllamaConnection(request);
+
+        // Assert
+        result.ShouldBeOfType<OkObjectResult>();
+    }
+
+    [Fact]
+    public async Task TestOllamaConnection_Unreachable_ReturnsProblem()
+    {
+        // Arrange
+        _testHttpMessageHandler.SetupThrow(new HttpRequestException("connection refused"));
+
+        var request = new TestOllamaConnectionRequest { OllamaUrl = "http://localhost:11434" };
+
+        // Act
+        var result = await _controller.TestOllamaConnection(request);
+
+        // Assert
+        var objectResult = result.ShouldBeOfType<ObjectResult>();
+        objectResult.StatusCode.ShouldBe(StatusCodes.Status400BadRequest);
+    }
+
+    [Fact]
+    public async Task TestOllamaConnection_UnexpectedStatusCode_ReturnsProblem()
+    {
+        // Arrange
+        _testHttpMessageHandler.SetupResponse((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.InternalServerError)));
+
+        var request = new TestOllamaConnectionRequest { OllamaUrl = "http://localhost:11434" };
+
+        // Act
+        var result = await _controller.TestOllamaConnection(request);
+
+        // Assert
+        var objectResult = result.ShouldBeOfType<ObjectResult>();
+        objectResult.StatusCode.ShouldBe(StatusCodes.Status400BadRequest);
     }
 }

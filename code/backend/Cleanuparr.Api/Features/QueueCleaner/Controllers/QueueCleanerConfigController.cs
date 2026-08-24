@@ -1,10 +1,14 @@
+using System.Text.Json;
+using Cleanuparr.Api.Extensions;
 using Cleanuparr.Api.Features.QueueCleaner.Contracts.Requests;
 using Cleanuparr.Domain.Enums;
+using Cleanuparr.Infrastructure.Features.Ollama;
 using Cleanuparr.Infrastructure.Services.Interfaces;
 using Cleanuparr.Infrastructure.Utilities;
 using Cleanuparr.Persistence;
 using Cleanuparr.Persistence.Models.Configuration;
 using Cleanuparr.Persistence.Models.Configuration.QueueCleaner;
+using Cleanuparr.Shared.Helpers;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -27,21 +31,34 @@ public sealed class QueueCleanerConfigController : ControllerBase
     /// </summary>
     private const string AiImportCacheKeyPrefix = "ai_import_";
 
+    /// <summary>
+    /// Timeout for the Ollama <c>/api/tags</c> connectivity probe. This is a lightweight
+    /// reachability check, not a classification call, so it does not need the full
+    /// <c>AiImportConfig.TimeoutSeconds</c> budget.
+    /// </summary>
+    private static readonly TimeSpan OllamaConnectionTestTimeout = TimeSpan.FromSeconds(5);
+
     private readonly ILogger<QueueCleanerConfigController> _logger;
     private readonly DataContext _dataContext;
     private readonly IJobManagementService _jobManagementService;
     private readonly MemoryCache _memoryCache;
+    private readonly IAiImportBudget _aiImportBudget;
+    private readonly IHttpClientFactory _httpClientFactory;
 
     public QueueCleanerConfigController(
         ILogger<QueueCleanerConfigController> logger,
         DataContext dataContext,
         IJobManagementService jobManagementService,
-        MemoryCache memoryCache)
+        MemoryCache memoryCache,
+        IAiImportBudget aiImportBudget,
+        IHttpClientFactory httpClientFactory)
     {
         _logger = logger;
         _dataContext = dataContext;
         _jobManagementService = jobManagementService;
         _memoryCache = memoryCache;
+        _aiImportBudget = aiImportBudget;
+        _httpClientFactory = httpClientFactory;
     }
 
     [HttpGet("queue_cleaner")]
@@ -102,6 +119,77 @@ public sealed class QueueCleanerConfigController : ControllerBase
         finally
         {
             DataContext.Lock.Release();
+        }
+    }
+
+    [HttpPost("queue_cleaner/ai_import/reset_breaker")]
+    public IActionResult ResetAiImportCircuitBreaker()
+    {
+        _aiImportBudget.Reset();
+
+        return Ok(new { Message = "AI import circuit breaker reset successfully" });
+    }
+
+    [HttpPost("queue_cleaner/ai_import/test_ollama")]
+    public async Task<IActionResult> TestOllamaConnection([FromBody] TestOllamaConnectionRequest request)
+    {
+        Uri tagsUri;
+        try
+        {
+            tagsUri = new Uri(new Uri(request.OllamaUrl), "/api/tags");
+        }
+        catch (UriFormatException ex)
+        {
+            return this.ProblemResult(StatusCodes.Status400BadRequest, $"Invalid Ollama URL: {ex.Message}");
+        }
+
+        HttpClient httpClient = _httpClientFactory.CreateClient(Constants.HttpClientOllamaName);
+
+        using CancellationTokenSource cts = new(OllamaConnectionTestTimeout);
+
+        HttpResponseMessage response;
+        try
+        {
+            response = await httpClient.GetAsync(tagsUri, cts.Token);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Ollama connectivity test to {Url} failed or timed out", request.OllamaUrl);
+            return this.ProblemResult(StatusCodes.Status400BadRequest, $"Unable to reach Ollama at {request.OllamaUrl}: {ex.Message}");
+        }
+
+        using (response)
+        {
+            if (!response.IsSuccessStatusCode)
+            {
+                return this.ProblemResult(
+                    StatusCodes.Status400BadRequest,
+                    $"Ollama responded with an unexpected status code: {(int)response.StatusCode}");
+            }
+
+            string body = await response.Content.ReadAsStringAsync();
+            OllamaTagsResponse? tags;
+            try
+            {
+                tags = JsonSerializer.Deserialize<OllamaTagsResponse>(body);
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogWarning(ex, "Ollama connectivity test to {Url} returned an unparsable response", request.OllamaUrl);
+                return this.ProblemResult(StatusCodes.Status400BadRequest, "Connected, but Ollama returned an unexpected response");
+            }
+
+            List<string> models = tags?.Models?
+                .Select(m => m.Name)
+                .Where(name => !string.IsNullOrEmpty(name))
+                .Select(name => name!)
+                .ToList() ?? [];
+
+            return Ok(new
+            {
+                Message = $"Connected — {models.Count} model(s) available",
+                Models = models,
+            });
         }
     }
 

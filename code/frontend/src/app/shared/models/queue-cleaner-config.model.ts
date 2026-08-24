@@ -30,6 +30,11 @@ export interface AiImportConfig {
   targetMessagePrefix: string;
 }
 
+export interface TestOllamaConnectionResult {
+  message: string;
+  models?: string[];
+}
+
 export interface QueueCleanerConfig {
   enabled: boolean;
   cronExpression: string;

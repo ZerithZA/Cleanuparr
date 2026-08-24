@@ -24,9 +24,11 @@ public sealed record SonarrManualImportCandidate
     public string? FolderName { get; init; }
 
     /// <summary>
-    /// The ID of the series that Sonarr matched the candidate to.
+    /// The series that Sonarr matched the candidate to, or <see langword="null"/> if Sonarr
+    /// could not resolve one. <c>GET /api/v3/manualimport</c> nests the matched series' ID under
+    /// this field rather than as a top-level <c>seriesId</c> property on the candidate.
     /// </summary>
-    public long SeriesId { get; init; }
+    public SonarrManualImportCandidateSeries? Series { get; init; }
 
     /// <summary>
     /// The episodes that Sonarr matched the candidate to.

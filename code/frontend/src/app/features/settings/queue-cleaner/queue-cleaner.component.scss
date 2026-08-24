@@ -11,6 +11,13 @@
 .form-section { @include form-section; }
 .form-actions { @include form-actions; }
 
+// Small action button (Test/Reset) placed right after a field within .form-stack
+.inline-action {
+  display: flex;
+  justify-content: flex-start;
+  margin-top: calc(-1 * var(--space-2));
+}
+
 // Coverage warning
 .coverage-warning {
   display: flex;

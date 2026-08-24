@@ -32,4 +32,12 @@ public interface IAiImportBudget
     /// have been recorded.
     /// </summary>
     void RecordFailure();
+
+    /// <summary>
+    /// Manually closes the circuit breaker and clears the consecutive-failure counter, for use
+    /// after an operator fixes a misconfiguration (e.g. a wrong Ollama URL) and wants to retry
+    /// immediately rather than waiting out <c>BreakerCooldownMinutes</c>. Does not touch the
+    /// per-tick time budget, which is a separate concern.
+    /// </summary>
+    void Reset();
 }

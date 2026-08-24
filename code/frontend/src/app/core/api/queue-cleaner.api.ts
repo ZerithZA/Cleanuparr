@@ -1,7 +1,7 @@
 import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
-import { QueueCleanerConfig } from '@shared/models/queue-cleaner-config.model';
+import { QueueCleanerConfig, TestOllamaConnectionResult } from '@shared/models/queue-cleaner-config.model';
 import { StallRule, SlowRule, CreateStallRuleDto, CreateSlowRuleDto } from '@shared/models/queue-rule.model';
 
 @Injectable({ providedIn: 'root' })
@@ -14,6 +14,14 @@ export class QueueCleanerApi {
 
   updateConfig(config: Partial<QueueCleanerConfig>): Observable<void> {
     return this.http.put<void>('/api/configuration/queue_cleaner', config);
+  }
+
+  resetAiImportCircuitBreaker(): Observable<{ message: string }> {
+    return this.http.post<{ message: string }>('/api/configuration/queue_cleaner/ai_import/reset_breaker', {});
+  }
+
+  testOllamaConnection(ollamaUrl: string): Observable<TestOllamaConnectionResult> {
+    return this.http.post<TestOllamaConnectionResult>('/api/configuration/queue_cleaner/ai_import/test_ollama', { ollamaUrl });
   }
 
   // Stall rules
