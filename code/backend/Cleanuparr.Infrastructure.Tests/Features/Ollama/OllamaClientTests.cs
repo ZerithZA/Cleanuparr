@@ -74,7 +74,7 @@ public sealed class OllamaClientTests
         });
 
         // Act
-        var response = await _client.ClassifyAsync("release", "series", [], CancellationToken.None);
+        var response = await _client.ClassifyAsync("release", "series", [], null, null, null, null, null, null, null, CancellationToken.None);
 
         // Assert
         response.Outcome.ShouldBe(OllamaClassificationOutcome.TransportFailure);
@@ -100,7 +100,7 @@ public sealed class OllamaClientTests
 
         // Act — must not throw: the transport-level cancellation is caught and mapped to
         // TransportFailure rather than propagating an exception.
-        var response = await _client.ClassifyAsync("release", "series", [], CancellationToken.None);
+        var response = await _client.ClassifyAsync("release", "series", [], null, null, null, null, null, null, null, CancellationToken.None);
 
         // Assert
         response.Outcome.ShouldBe(OllamaClassificationOutcome.TransportFailure);
@@ -133,7 +133,7 @@ public sealed class OllamaClientTests
         });
 
         // Act
-        var response = await _client.ClassifyAsync("release", "series", [], CancellationToken.None);
+        var response = await _client.ClassifyAsync("release", "series", [], null, null, null, null, null, null, null, CancellationToken.None);
 
         // Assert — the request's own token was cancelled (by CancelAfter(3s)), independent of any
         // HttpClient-level or general timeout value.
@@ -152,8 +152,8 @@ public sealed class OllamaClientTests
         _httpMessageHandler.SetupResponse((_, _) => Task.FromResult(SuccessResponse(true, 100)));
 
         // Act
-        await _client.ClassifyAsync("Release One", "Series", [], CancellationToken.None);
-        await _client.ClassifyAsync("A Completely Different Release Two", "Series", [], CancellationToken.None);
+        await _client.ClassifyAsync("Release One", "Series", [], null, null, null, null, null, null, null, CancellationToken.None);
+        await _client.ClassifyAsync("A Completely Different Release Two", "Series", [], null, null, null, null, null, null, null, CancellationToken.None);
 
         // Assert
         _httpMessageHandler.CapturedRequestBodies.Count.ShouldBe(2);
@@ -184,7 +184,7 @@ public sealed class OllamaClientTests
         }));
 
         // Act
-        var response = await _client.ClassifyAsync(injection, "Series", [], CancellationToken.None);
+        var response = await _client.ClassifyAsync(injection, "Series", [], null, null, null, null, null, null, null, CancellationToken.None);
 
         // Assert
         response.Outcome.ShouldBe(OllamaClassificationOutcome.InvalidResponse);
@@ -194,7 +194,11 @@ public sealed class OllamaClientTests
         string systemContent = doc.RootElement.GetProperty("messages")[0].GetProperty("content").GetString()!;
         systemContent.ShouldNotContain(injection);
         string userContent = doc.RootElement.GetProperty("messages")[1].GetProperty("content").GetString()!;
-        userContent.ShouldContain(injection);
+        // userContent is itself a JSON object (e.g. {"releaseTitle":"...",...}) serialized to a
+        // string, so the injection payload appears inside it JSON-escaped (its own embedded quotes
+        // become \") rather than verbatim - assert against that serialized form.
+        string escapedInjection = injection.Replace("\"", "\\\"");
+        userContent.ShouldContain(escapedInjection);
     }
 
     // AC-30: response parsing rejects an object with keys outside the declared schema.
@@ -210,7 +214,7 @@ public sealed class OllamaClientTests
         }));
 
         // Act
-        var response = await _client.ClassifyAsync("release", "series", [], CancellationToken.None);
+        var response = await _client.ClassifyAsync("release", "series", [], null, null, null, null, null, null, null, CancellationToken.None);
 
         // Assert
         response.Outcome.ShouldBe(OllamaClassificationOutcome.InvalidResponse);
@@ -226,7 +230,7 @@ public sealed class OllamaClientTests
         _httpMessageHandler.SetupResponse((_, _) => Task.FromResult(SuccessResponse(true, confidence)));
 
         // Act
-        var response = await _client.ClassifyAsync("release", "series", [], CancellationToken.None);
+        var response = await _client.ClassifyAsync("release", "series", [], null, null, null, null, null, null, null, CancellationToken.None);
 
         // Assert
         response.Outcome.ShouldBe(OllamaClassificationOutcome.InvalidResponse);
@@ -245,7 +249,7 @@ public sealed class OllamaClientTests
         }));
 
         // Act
-        var response = await _client.ClassifyAsync("release", "series", [], CancellationToken.None);
+        var response = await _client.ClassifyAsync("release", "series", [], null, null, null, null, null, null, null, CancellationToken.None);
 
         // Assert
         response.Outcome.ShouldBe(OllamaClassificationOutcome.InvalidResponse);
@@ -260,7 +264,7 @@ public sealed class OllamaClientTests
         string longTitle = new string('x', 1000);
 
         // Act
-        await _client.ClassifyAsync(longTitle, "series", [], CancellationToken.None);
+        await _client.ClassifyAsync(longTitle, "series", [], null, null, null, null, null, null, null, CancellationToken.None);
 
         // Assert
         string body = _httpMessageHandler.CapturedRequestBodies.ShouldHaveSingleItem()!;
@@ -269,6 +273,98 @@ public sealed class OllamaClientTests
         using JsonDocument dataDoc = JsonDocument.Parse(userContent);
         string releaseTitle = dataDoc.RootElement.GetProperty("releaseTitle").GetString()!;
         releaseTitle.Length.ShouldBe(512);
+    }
+
+    // The series year and expected episode title/air date are serialised into the DATA payload
+    // alongside releaseTitle/seriesTitle/seriesAliases.
+    [Fact]
+    public async Task ClassifyAsync_YearAndEpisodeProvided_SerialisedIntoUserDataPayload()
+    {
+        // Arrange
+        _httpMessageHandler.SetupResponse((_, _) => Task.FromResult(SuccessResponse(true, 100)));
+
+        // Act
+        await _client.ClassifyAsync(
+            "release",
+            "series",
+            [],
+            2026,
+            "EPISODE 06: DUMB BARTER",
+            new DateOnly(2026, 8, 11),
+            null,
+            null,
+            null,
+            null,
+            CancellationToken.None);
+
+        // Assert
+        string body = _httpMessageHandler.CapturedRequestBodies.ShouldHaveSingleItem()!;
+        using JsonDocument doc = JsonDocument.Parse(body);
+        string userContent = doc.RootElement.GetProperty("messages")[1].GetProperty("content").GetString()!;
+        using JsonDocument dataDoc = JsonDocument.Parse(userContent);
+        dataDoc.RootElement.GetProperty("seriesFirstAiredYear").GetInt32().ShouldBe(2026);
+        dataDoc.RootElement.GetProperty("expectedEpisodeTitle").GetString().ShouldBe("EPISODE 06: DUMB BARTER");
+        dataDoc.RootElement.GetProperty("expectedEpisodeAirDate").GetString().ShouldBe("2026-08-11");
+    }
+
+    // Null year/episode fields are omitted from the outbound instruction text and do not throw;
+    // the classification still proceeds using the remaining fields only.
+    [Fact]
+    public async Task ClassifyAsync_YearAndEpisodeOmitted_DoesNotThrowAndStillClassifies()
+    {
+        // Arrange
+        _httpMessageHandler.SetupResponse((_, _) => Task.FromResult(SuccessResponse(true, 100)));
+
+        // Act
+        var response = await _client.ClassifyAsync("release", "series", [], null, null, null, null, null, null, null, CancellationToken.None);
+
+        // Assert
+        response.Outcome.ShouldBe(OllamaClassificationOutcome.Success);
+    }
+
+    // The series' typical episode runtime in minutes is serialised into the DATA payload
+    // alongside releaseTitle/seriesTitle/seriesAliases.
+    [Fact]
+    public async Task ClassifyAsync_SeriesRuntimeMinutesProvided_SerialisedIntoUserDataPayload()
+    {
+        // Arrange
+        _httpMessageHandler.SetupResponse((_, _) => Task.FromResult(SuccessResponse(true, 100)));
+
+        // Act
+        await _client.ClassifyAsync(
+            "release",
+            "series",
+            [],
+            null,
+            null,
+            null,
+            42,
+            null,
+            null,
+            null,
+            CancellationToken.None);
+
+        // Assert
+        string body = _httpMessageHandler.CapturedRequestBodies.ShouldHaveSingleItem()!;
+        using JsonDocument doc = JsonDocument.Parse(body);
+        string userContent = doc.RootElement.GetProperty("messages")[1].GetProperty("content").GetString()!;
+        using JsonDocument dataDoc = JsonDocument.Parse(userContent);
+        dataDoc.RootElement.GetProperty("seriesRuntimeMinutes").GetInt32().ShouldBe(42);
+    }
+
+    // A null seriesRuntimeMinutes is omitted from the outbound instruction text and does not
+    // throw; the classification still proceeds using the remaining fields only.
+    [Fact]
+    public async Task ClassifyAsync_SeriesRuntimeMinutesOmitted_DoesNotThrowAndStillClassifies()
+    {
+        // Arrange
+        _httpMessageHandler.SetupResponse((_, _) => Task.FromResult(SuccessResponse(true, 100)));
+
+        // Act
+        var response = await _client.ClassifyAsync("release", "series", [], null, null, null, null, null, null, null, CancellationToken.None);
+
+        // Assert
+        response.Outcome.ShouldBe(OllamaClassificationOutcome.Success);
     }
 
     // AC-30b: confidence returned on Ollama's observed 0-1 fractional scale (e.g. 1 for a full
@@ -280,7 +376,7 @@ public sealed class OllamaClientTests
         _httpMessageHandler.SetupResponse((_, _) => Task.FromResult(SuccessResponse(true, 1)));
 
         // Act
-        var response = await _client.ClassifyAsync("release", "series", [], CancellationToken.None);
+        var response = await _client.ClassifyAsync("release", "series", [], null, null, null, null, null, null, null, CancellationToken.None);
 
         // Assert
         response.Outcome.ShouldBe(OllamaClassificationOutcome.Success);
@@ -298,7 +394,7 @@ public sealed class OllamaClientTests
         _httpMessageHandler.SetupResponse((_, _) => Task.FromResult(SuccessResponse(true, 0.5)));
 
         // Act
-        var response = await _client.ClassifyAsync("release", "series", [], CancellationToken.None);
+        var response = await _client.ClassifyAsync("release", "series", [], null, null, null, null, null, null, null, CancellationToken.None);
 
         // Assert
         response.Outcome.ShouldBe(OllamaClassificationOutcome.Success);
@@ -312,7 +408,7 @@ public sealed class OllamaClientTests
         _httpMessageHandler.SetupResponse((_, _) => Task.FromResult(SuccessResponse(false, 0)));
 
         // Act
-        var response = await _client.ClassifyAsync("release", "series", [], CancellationToken.None);
+        var response = await _client.ClassifyAsync("release", "series", [], null, null, null, null, null, null, null, CancellationToken.None);
 
         // Assert
         response.Outcome.ShouldBe(OllamaClassificationOutcome.Success);
@@ -328,7 +424,7 @@ public sealed class OllamaClientTests
         _budget.CanCallOllama().Returns(false);
 
         // Act
-        var response = await _client.ClassifyAsync("release", "series", [], CancellationToken.None);
+        var response = await _client.ClassifyAsync("release", "series", [], null, null, null, null, null, null, null, CancellationToken.None);
 
         // Assert
         response.Outcome.ShouldBe(OllamaClassificationOutcome.SkippedByBudget);
@@ -342,7 +438,7 @@ public sealed class OllamaClientTests
         _httpMessageHandler.SetupResponse((_, _) => Task.FromResult(SuccessResponse(true, 90)));
 
         // Act
-        await _client.ClassifyAsync("release", "series", [], CancellationToken.None);
+        await _client.ClassifyAsync("release", "series", [], null, null, null, null, null, null, null, CancellationToken.None);
 
         // Assert
         _budget.Received(1).RecordSuccess();
@@ -356,7 +452,7 @@ public sealed class OllamaClientTests
         _httpMessageHandler.SetupResponse(HttpStatusCode.InternalServerError);
 
         // Act
-        var response = await _client.ClassifyAsync("release", "series", [], CancellationToken.None);
+        var response = await _client.ClassifyAsync("release", "series", [], null, null, null, null, null, null, null, CancellationToken.None);
 
         // Assert
         response.Outcome.ShouldBe(OllamaClassificationOutcome.TransportFailure);

@@ -22,6 +22,19 @@ const CONFIG: QueueCleanerConfig = {
     patterns: ['unpack'],
     changeCategory: false,
   },
+  aiImport: {
+    enabled: false,
+    confidenceThreshold: 75,
+    timeoutSeconds: 8,
+    tickBudgetSeconds: 30,
+    breakerFailureThreshold: 5,
+    breakerCooldownMinutes: 15,
+    skipBudget: 3,
+    decisionCacheTtlHours: 24,
+    ollamaUrl: '',
+    model: '',
+    targetMessagePrefix: 'Found matching series via grab history',
+  },
   downloadingMetadataMaxStrikes: 6,
 };
 
@@ -317,6 +330,19 @@ describe('QueueCleanerComponent', () => {
         patternMode: PatternMode.Exclude,
         changeCategory: false,
       },
+      aiImport: {
+        enabled: false,
+        confidenceThreshold: 75,
+        timeoutSeconds: 8,
+        tickBudgetSeconds: 30,
+        breakerFailureThreshold: 5,
+        breakerCooldownMinutes: 15,
+        skipBudget: 3,
+        decisionCacheTtlHours: 24,
+        ollamaUrl: '',
+        model: '',
+        targetMessagePrefix: 'Found matching series via grab history',
+      },
       downloadingMetadataMaxStrikes: 9,
     });
     expect(component.dirty()).toBe(false);
@@ -341,6 +367,100 @@ describe('QueueCleanerComponent', () => {
           changeCategory: true,
         }),
         downloadingMetadataMaxStrikes: 3,
+      }),
+    );
+  });
+
+  it('loads the AI import config into the form', () => {
+    const { component } = setup({
+      ...CONFIG,
+      aiImport: {
+        enabled: true,
+        confidenceThreshold: 80,
+        timeoutSeconds: 10,
+        tickBudgetSeconds: 45,
+        breakerFailureThreshold: 4,
+        breakerCooldownMinutes: 20,
+        skipBudget: 2,
+        decisionCacheTtlHours: 12,
+        ollamaUrl: 'http://localhost:11434',
+        model: 'llama3.2:3b',
+        targetMessagePrefix: 'Found matching series via grab history',
+      },
+    });
+
+    expect(component.qcForm.aiImportEnabled().value()).toBe(true);
+    expect(component.qcForm.aiImportOllamaUrl().value()).toBe('http://localhost:11434');
+    expect(component.qcForm.aiImportModel().value()).toBe('llama3.2:3b');
+    expect(component.qcForm.aiImportConfidenceThreshold().value()).toBe(80);
+    expect(component.qcForm.aiImportTimeoutSeconds().value()).toBe(10);
+    expect(component.dirty()).toBe(false);
+  });
+
+  it('shows the AI import section and hides its fields until enabled', () => {
+    const { fixture, component } = setup();
+
+    component.aiImportExpanded.set(true);
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.textContent).toContain('AI-Assisted Import Recovery');
+    expect(fixture.nativeElement.querySelector('input[placeholder="http://localhost:11434"]')).toBeNull();
+
+    component.qcForm.aiImportEnabled().value.set(true);
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('input[placeholder="http://localhost:11434"]')).not.toBeNull();
+  });
+
+  it('rejects out-of-range confidence threshold and timeout seconds', () => {
+    const { fixture, component } = setup();
+
+    component.qcForm.aiImportEnabled().value.set(true);
+    component.qcForm.aiImportConfidenceThreshold().value.set(40);
+    component.qcForm.aiImportTimeoutSeconds().value.set(60);
+    fixture.detectChanges();
+
+    expect(component.qcForm.aiImportConfidenceThreshold().errors()[0]?.message).toBe('Value must be at least 50');
+    expect(component.qcForm.aiImportTimeoutSeconds().errors()[0]?.message).toBe('Value cannot exceed 30');
+    expect(component.hasErrors()).toBe(true);
+
+    component.qcForm.aiImportConfidenceThreshold().value.set(90);
+    component.qcForm.aiImportTimeoutSeconds().value.set(15);
+    fixture.detectChanges();
+
+    expect(component.qcForm.aiImportConfidenceThreshold().errors()).toEqual([]);
+    expect(component.qcForm.aiImportTimeoutSeconds().errors()).toEqual([]);
+  });
+
+  it('marks the target message prefix required when AI import is being configured', () => {
+    const { fixture, component } = setup();
+
+    component.qcForm.aiImportEnabled().value.set(true);
+    component.qcForm.aiImportTargetMessagePrefix().value.set('   ');
+    fixture.detectChanges();
+
+    expect(component.qcForm.aiImportTargetMessagePrefix().errors()[0]?.message).toBe('This field is required');
+  });
+
+  it('includes AI import edits in the saved payload', () => {
+    const { fixture, component, api } = setup();
+
+    component.qcForm.aiImportEnabled().value.set(true);
+    component.qcForm.aiImportOllamaUrl().value.set('http://localhost:11434');
+    component.qcForm.aiImportModel().value.set('llama3.2:3b');
+    fixture.detectChanges();
+
+    expect(component.dirty()).toBe(true);
+
+    component.save();
+
+    expect(api.updateConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        aiImport: expect.objectContaining({
+          enabled: true,
+          ollamaUrl: 'http://localhost:11434',
+          model: 'llama3.2:3b',
+        }),
       }),
     );
   });
