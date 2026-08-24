@@ -103,6 +103,8 @@ export class QueueCleanerComponent implements HasPendingChanges {
   readonly loadError = computed(() => !!this.configResource.error());
   readonly saving = signal(false);
   readonly saved = signal(false);
+  readonly resettingBreaker = signal(false);
+  readonly testingOllama = signal(false);
 
   private readonly model = signal<QueueCleanerFormModel>({
     enabled: false,
@@ -460,6 +462,35 @@ export class QueueCleanerComponent implements HasPendingChanges {
       error: () => {
         this.toast.error('Failed to save queue cleaner settings');
         this.saving.set(false);
+      },
+    });
+  }
+
+  resetAiImportCircuitBreaker(): void {
+    this.resettingBreaker.set(true);
+    this.api.resetAiImportCircuitBreaker().subscribe({
+      next: () => {
+        this.toast.success('Circuit breaker reset');
+        this.resettingBreaker.set(false);
+      },
+      error: () => {
+        this.toast.error('Failed to reset circuit breaker');
+        this.resettingBreaker.set(false);
+      },
+    });
+  }
+
+  testOllamaConnection(): void {
+    const ollamaUrl = this.model().aiImportOllamaUrl;
+    this.testingOllama.set(true);
+    this.api.testOllamaConnection(ollamaUrl).subscribe({
+      next: (result) => {
+        this.toast.success(result.message || 'Connection successful');
+        this.testingOllama.set(false);
+      },
+      error: () => {
+        this.toast.error('Connection test failed');
+        this.testingOllama.set(false);
       },
     });
   }

@@ -1,8 +1,9 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import { QueueCleanerApi } from '@core/api/queue-cleaner.api';
 import { ConfirmService } from '@core/services/confirm.service';
+import { ToastService } from '@core/services/toast.service';
 import { QueueCleanerConfig } from '@shared/models/queue-cleaner-config.model';
 import { SlowRule, StallRule } from '@shared/models/queue-rule.model';
 import { PatternMode, ScheduleUnit, TorrentPrivacyType } from '@shared/models/enums';
@@ -81,6 +82,8 @@ function createApi(config: QueueCleanerConfig, stall: StallRule[], slow: SlowRul
     getSlowRules: vi.fn(() => of(state.slow)),
     deleteStallRule: vi.fn(() => of(undefined)),
     deleteSlowRule: vi.fn(() => of(undefined)),
+    resetAiImportCircuitBreaker: vi.fn(() => of({ message: 'AI import circuit breaker reset successfully' })),
+    testOllamaConnection: vi.fn(() => of({ message: 'Connected — 2 model(s) available', models: ['llama3.1:8b', 'llama3.2:3b'] })),
   };
 }
 
@@ -89,6 +92,7 @@ interface Setup {
   component: QueueCleanerComponent;
   api: ReturnType<typeof createApi>;
   confirm: ConfirmService;
+  toast: ToastService;
 }
 
 describe('QueueCleanerComponent', () => {
@@ -100,9 +104,8 @@ describe('QueueCleanerComponent', () => {
     config: QueueCleanerConfig = CONFIG,
     stall: StallRule[] = STALL_RULES,
     slow: SlowRule[] = SLOW_RULES,
+    api: ReturnType<typeof createApi> = createApi(config, stall, slow),
   ): Setup {
-    const api = createApi(config, stall, slow);
-
     TestBed.configureTestingModule({
       providers: [provideHttpClient(), { provide: QueueCleanerApi, useValue: api }],
     });
@@ -115,6 +118,7 @@ describe('QueueCleanerComponent', () => {
       component: fixture.componentInstance,
       api,
       confirm: TestBed.inject(ConfirmService),
+      toast: TestBed.inject(ToastService),
     };
   }
 
@@ -463,5 +467,83 @@ describe('QueueCleanerComponent', () => {
         }),
       }),
     );
+  });
+
+  it('resets the AI import circuit breaker and shows a success toast', () => {
+    const { component, api, toast } = setup();
+    const successSpy = vi.spyOn(toast, 'success');
+
+    expect(component.resettingBreaker()).toBe(false);
+
+    component.resetAiImportCircuitBreaker();
+
+    expect(api.resetAiImportCircuitBreaker).toHaveBeenCalled();
+    expect(successSpy).toHaveBeenCalledWith('Circuit breaker reset');
+    expect(component.resettingBreaker()).toBe(false);
+  });
+
+  it('shows an error toast and stops the spinner when the circuit breaker reset fails', () => {
+    const api = createApi(CONFIG, STALL_RULES, SLOW_RULES);
+    api.resetAiImportCircuitBreaker.mockReturnValue(throwError(() => new Error('boom')));
+    const { component, toast } = setup(CONFIG, STALL_RULES, SLOW_RULES, api);
+    const errorSpy = vi.spyOn(toast, 'error');
+
+    component.resetAiImportCircuitBreaker();
+
+    expect(errorSpy).toHaveBeenCalledWith('Failed to reset circuit breaker');
+    expect(component.resettingBreaker()).toBe(false);
+  });
+
+  it('tests the current (possibly unsaved) Ollama URL and shows the model count on success', () => {
+    const { fixture, component, api, toast } = setup();
+    const successSpy = vi.spyOn(toast, 'success');
+
+    component.qcForm.aiImportEnabled().value.set(true);
+    component.qcForm.aiImportOllamaUrl().value.set('http://ollama.internal:11434');
+    fixture.detectChanges();
+
+    expect(component.testingOllama()).toBe(false);
+
+    component.testOllamaConnection();
+
+    expect(api.testOllamaConnection).toHaveBeenCalledWith('http://ollama.internal:11434');
+    expect(successSpy).toHaveBeenCalledWith('Connected — 2 model(s) available');
+    expect(component.testingOllama()).toBe(false);
+  });
+
+  it('shows an error toast and stops the spinner when the Ollama connection test fails', () => {
+    const api = createApi(CONFIG, STALL_RULES, SLOW_RULES);
+    api.testOllamaConnection.mockReturnValue(throwError(() => new Error('unreachable')));
+    const { fixture, component, toast } = setup(CONFIG, STALL_RULES, SLOW_RULES, api);
+    const errorSpy = vi.spyOn(toast, 'error');
+
+    component.qcForm.aiImportEnabled().value.set(true);
+    component.qcForm.aiImportOllamaUrl().value.set('http://localhost:11434');
+    fixture.detectChanges();
+
+    component.testOllamaConnection();
+
+    expect(errorSpy).toHaveBeenCalledWith('Connection test failed');
+    expect(component.testingOllama()).toBe(false);
+  });
+
+  it('renders the Test and Reset Circuit Breaker buttons only when AI import is enabled', () => {
+    const { fixture, component } = setup();
+
+    component.aiImportExpanded.set(true);
+    fixture.detectChanges();
+
+    const buttonTextsBefore = Array.from(fixture.nativeElement.querySelectorAll('button'))
+      .map((b) => (b as HTMLElement).textContent?.trim());
+    expect(buttonTextsBefore).not.toContain('Test');
+    expect(buttonTextsBefore).not.toContain('Reset Circuit Breaker');
+
+    component.qcForm.aiImportEnabled().value.set(true);
+    fixture.detectChanges();
+
+    const buttonTextsAfter = Array.from(fixture.nativeElement.querySelectorAll('button'))
+      .map((b) => (b as HTMLElement).textContent?.trim());
+    expect(buttonTextsAfter).toContain('Test');
+    expect(buttonTextsAfter).toContain('Reset Circuit Breaker');
   });
 });

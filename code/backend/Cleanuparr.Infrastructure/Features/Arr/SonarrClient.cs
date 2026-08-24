@@ -692,6 +692,17 @@ public class SonarrClient : ArrClient, ISonarrClient
 
         SonarrManualImportCandidate candidate = candidates[0];
 
+        if (candidate.Series is null)
+        {
+            _logger.LogDebug(
+                "skip manual import | candidate has no matched series | {downloadId} | {title}",
+                record.DownloadId,
+                record.Title
+            );
+
+            return false;
+        }
+
         SonarrManualImportCommand command = new()
         {
             Files =
@@ -700,7 +711,7 @@ public class SonarrClient : ArrClient, ISonarrClient
                 {
                     Path = candidate.Path,
                     FolderName = candidate.FolderName,
-                    SeriesId = candidate.SeriesId,
+                    SeriesId = candidate.Series.Id,
                     EpisodeIds = candidate.Episodes.Select(x => x.Id).ToList(),
                     Quality = candidate.Quality,
                     Languages = candidate.Languages,

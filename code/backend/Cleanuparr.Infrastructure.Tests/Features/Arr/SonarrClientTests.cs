@@ -546,7 +546,7 @@ public class SonarrClientTests
         {
             Path = "/downloads/show/episode.mkv",
             FolderName = "show",
-            SeriesId = 1781,
+            Series = new SonarrManualImportCandidateSeries { Id = 1781 },
             Episodes = [new SonarrManualImportEpisode { Id = 91707, HasFile = false }],
             Quality = EmptyJsonObject(),
             Languages = EmptyJsonObject(),
@@ -594,8 +594,8 @@ public class SonarrClientTests
         var record = BuildRecord(2);
         var candidates = new[]
         {
-            new SonarrManualImportCandidate { Path = "/a.mkv", SeriesId = 1, DownloadId = record.DownloadId, Quality = EmptyJsonObject(), Languages = EmptyJsonObject() },
-            new SonarrManualImportCandidate { Path = "/b.mkv", SeriesId = 1, DownloadId = record.DownloadId, Quality = EmptyJsonObject(), Languages = EmptyJsonObject() },
+            new SonarrManualImportCandidate { Path = "/a.mkv", Series = new SonarrManualImportCandidateSeries { Id = 1 }, DownloadId = record.DownloadId, Quality = EmptyJsonObject(), Languages = EmptyJsonObject() },
+            new SonarrManualImportCandidate { Path = "/b.mkv", Series = new SonarrManualImportCandidateSeries { Id = 1 }, DownloadId = record.DownloadId, Quality = EmptyJsonObject(), Languages = EmptyJsonObject() },
         };
 
         _httpMessageHandler.SetupResponse((_, _) => Task.FromResult(JsonResponse(candidates)));
@@ -1224,7 +1224,7 @@ public class SonarrClientTests
         {
             Path = "/downloads/show/episode.mkv",
             FolderName = "show",
-            SeriesId = 1781,
+            Series = new SonarrManualImportCandidateSeries { Id = 1781 },
             Episodes = [new SonarrManualImportEpisode { Id = 91707, HasFile = false }],
             Quality = EmptyJsonObject(),
             Languages = EmptyJsonObject(),
@@ -1366,7 +1366,7 @@ public class SonarrClientTests
         {
             Path = "/downloads/show/episode.mkv",
             FolderName = "show",
-            SeriesId = 1781,
+            Series = new SonarrManualImportCandidateSeries { Id = 1781 },
             Episodes = [new SonarrManualImportEpisode { Id = 91707, HasFile = false }],
             Quality = EmptyJsonObject(),
             Languages = EmptyJsonObject(),

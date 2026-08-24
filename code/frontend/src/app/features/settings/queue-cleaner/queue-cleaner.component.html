@@ -120,6 +120,11 @@
           <app-input label="Ollama URL" placeholder="http://localhost:11434" [formField]="qcForm.aiImportOllamaUrl"
             hint="Base URL of the Ollama server to use for verification"
             helpKey="queue-cleaner:aiImport.ollamaUrl" />
+          <div class="inline-action">
+            <app-button variant="secondary" size="sm" [loading]="testingOllama()" (clicked)="testOllamaConnection()">
+              Test
+            </app-button>
+          </div>
           <app-input label="Model" placeholder="llama3.1:8b" [formField]="qcForm.aiImportModel"
             hint="Name of the Ollama model to use for verification. Smaller models (e.g. llama3.2:3b) have shown unreliable classification accuracy - llama3.1:8b or larger is recommended"
             helpKey="queue-cleaner:aiImport.model" />
@@ -157,6 +162,11 @@
             hint="How long the circuit breaker stays open before retrying Ollama"
             [error]="qcForm.aiImportBreakerCooldownMinutes().errors()[0]?.message"
             helpKey="queue-cleaner:aiImport.breakerCooldownMinutes" />
+          <div class="inline-action">
+            <app-button variant="secondary" size="sm" [loading]="resettingBreaker()" (clicked)="resetAiImportCircuitBreaker()">
+              Reset Circuit Breaker
+            </app-button>
+          </div>
           <app-number-input label="Skip Budget" [formField]="qcForm.aiImportSkipBudget"
             hint="Number of consecutive low-confidence skips allowed before falling back to the normal strike path"
             [error]="qcForm.aiImportSkipBudget().errors()[0]?.message"

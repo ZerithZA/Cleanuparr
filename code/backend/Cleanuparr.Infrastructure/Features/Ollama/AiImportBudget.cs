@@ -91,4 +91,12 @@ public sealed class AiImportBudget : IAiImportBudget
             _consecutiveFailures,
             config.BreakerCooldownMinutes);
     }
+
+    public void Reset()
+    {
+        _consecutiveFailures = 0;
+        _breakerOpen = false;
+
+        _logger.LogInformation("AI import circuit breaker manually reset");
+    }
 }

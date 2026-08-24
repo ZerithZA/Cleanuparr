@@ -197,4 +197,62 @@ public sealed class AiImportBudgetTests
         // Assert — breaker fully closed; further calls are allowed without waiting on cooldown.
         _budget.CanCallOllama().ShouldBeTrue();
     }
+
+    // Manual reset: an operator who fixes a misconfiguration (e.g. a wrong Ollama URL) can
+    // immediately retry rather than waiting out BreakerCooldownMinutes.
+    [Fact]
+    public void Reset_OpenBreaker_ClosesItImmediately()
+    {
+        // Arrange — open the breaker.
+        SetConfig(breakerFailureThreshold: 5, breakerCooldownMinutes: 15);
+        for (int i = 0; i < 5; i++)
+        {
+            _budget.RecordFailure();
+        }
+        _budget.CanCallOllama().ShouldBeFalse();
+
+        // Act
+        _budget.Reset();
+
+        // Assert — breaker closed without waiting on cooldown.
+        _budget.CanCallOllama().ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Reset_ClearsConsecutiveFailureCounter()
+    {
+        // Arrange — accumulate failures below the threshold.
+        SetConfig(breakerFailureThreshold: 5, breakerCooldownMinutes: 15);
+        for (int i = 0; i < 4; i++)
+        {
+            _budget.RecordFailure();
+        }
+
+        // Act — reset, then repeat 4 more failures; if the counter wasn't cleared this would
+        // total 8 and open the breaker.
+        _budget.Reset();
+        for (int i = 0; i < 4; i++)
+        {
+            _budget.RecordFailure();
+        }
+
+        // Assert
+        _budget.CanCallOllama().ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Reset_DoesNotAffectTickBudget()
+    {
+        // Arrange
+        SetConfig(tickBudgetSeconds: 30);
+        _budget.StartTick();
+        _timeProvider.Advance(TimeSpan.FromSeconds(31));
+        _budget.CanCallOllama().ShouldBeFalse();
+
+        // Act — reset only touches the breaker, not the per-tick stopwatch.
+        _budget.Reset();
+
+        // Assert — still denied because the tick budget itself was not reset.
+        _budget.CanCallOllama().ShouldBeFalse();
+    }
 }
