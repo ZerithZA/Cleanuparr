@@ -32,4 +32,13 @@ public sealed record Episode
     /// matching, since some releases label episodes by absolute number instead of season/episode.
     /// </summary>
     public int? AbsoluteEpisodeNumber { get; set; }
+
+    /// <summary>
+    /// The ID of the episode's existing file, as returned by <c>GET /api/v3/episode</c>'s
+    /// <c>episodeFileId</c> field. <see langword="null"/> (or <c>0</c>, Sonarr's "no file" sentinel)
+    /// when the episode has no file. Used to look up the existing file's upgrade-eligibility data
+    /// (<see cref="Cleanuparr.Domain.Entities.Arr.ArrEpisodeFile"/>) when deciding whether an
+    /// AI-assisted import into an episode that already has a file is a genuine upgrade.
+    /// </summary>
+    public long? EpisodeFileId { get; set; }
 }

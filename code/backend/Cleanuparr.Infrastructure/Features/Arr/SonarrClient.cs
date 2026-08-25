@@ -392,13 +392,15 @@ public class SonarrClient : ArrClient, ISonarrClient
     /// </list>
     /// Only once every guard above has passed does this method call Ollama. After classification,
     /// if <c>Confidence</c> is below <see cref="AiImportConfig.ConfidenceThreshold"/> the record
-    /// falls through. Then - and only then, deliberately after classification rather than before it
-    /// - if <see cref="QueueRecord.EpisodeHasFile"/> is <see langword="true"/> the classification is
-    /// still logged (so real data accumulates on this record shape) but the import is suppressed and
-    /// this method returns <see cref="AiImportOutcome.FallThrough"/>: Sonarr's behaviour for a
-    /// manual import into an episode that already has a file was never established, so importing
-    /// over an existing file on the strength of a non-deterministic classification is avoided by
-    /// default (AC-50). Otherwise the manual import is attempted.
+    /// falls through. Otherwise the manual import is attempted via <see cref="TryManualImportAsync"/>.
+    /// If <see cref="QueueRecord.EpisodeHasFile"/> is <see langword="true"/>, the classification is
+    /// still logged here (so real data accumulates on this record shape) but the actual
+    /// upgrade-eligibility decision - whether the existing file's quality cutoff is not met AND the
+    /// candidate's custom-format score is strictly higher than the existing file's - is deferred to
+    /// <see cref="TryManualImportAsync"/>, which has access to both the existing file's data (via
+    /// <see cref="GetEpisodeFilesAsync"/>) and the manual-import candidate's custom-format score
+    /// (formerly AC-50, which unconditionally suppressed any import into an episode with an existing
+    /// file; that has been replaced by this upgrade-aware check).
     /// </remarks>
     public override async Task<AiImportOutcome> TryAiAssistedImportAsync(ArrInstance instance, QueueRecord record, bool isPrivateDownload)
     {
@@ -550,22 +552,21 @@ public class SonarrClient : ArrClient, ISonarrClient
 
         if (record.EpisodeHasFile)
         {
-            // Guard runs AFTER classification, deliberately: the classification is still logged so
-            // real data accumulates on this record shape, but Sonarr's behaviour for a manual
-            // import into an episode that already has a file was never established, so the import
-            // itself is conservatively suppressed (AC-50).
-            _logger.LogInformation(
-                "AI-assisted import classification matched but the episode already has a file, so the import was not performed | match={match} confidence={confidence} reasoning={reasoning} | {downloadId} | {title}",
+            // The classification stage still logs a signal for record-keeping, but the actual
+            // accept/reject-as-not-an-upgrade decision (and its detailed logging) happens inside
+            // TryManualImportAsync, which has access to both the existing file's data and the
+            // manual-import candidate's custom-format score.
+            _logger.LogDebug(
+                "AI-assisted import classification matched but the episode already has a file | checking whether the release is a genuine upgrade before deciding | match={match} confidence={confidence} reasoning={reasoning} | {downloadId} | {title}",
                 result.Match,
                 result.Confidence,
                 result.Reasoning,
                 record.DownloadId,
                 record.Title
             );
-            return AiImportOutcome.FallThrough;
         }
 
-        bool imported = await TryManualImportAsync(instance, record);
+        bool imported = await TryManualImportAsync(instance, record, record.EpisodeHasFile, episode?.EpisodeFileId);
 
         if (!imported)
         {
@@ -648,13 +649,28 @@ public class SonarrClient : ArrClient, ISonarrClient
     /// the <c>ManualImport</c> command. Assumes the caller has already decided this record is
     /// eligible for an AI-assisted import (private-tracker and candidacy checks happen upstream).
     /// </summary>
+    /// <param name="episodeHasFile">
+    /// Whether the target episode already has a file (<see cref="QueueRecord.EpisodeHasFile"/>).
+    /// When <see langword="true"/>, the import is only issued if Sonarr's own data says it is a
+    /// genuine upgrade: see <paramref name="episodeFileId"/>.
+    /// </param>
+    /// <param name="episodeFileId">
+    /// The existing file's ID (<see cref="Episode.EpisodeFileId"/>), used to look up its
+    /// upgrade-eligibility data when <paramref name="episodeHasFile"/> is <see langword="true"/>.
+    /// <see langword="null"/> when the episode lookup failed or the episode has no file id - in
+    /// that case the upgrade check cannot be evaluated and the import is conservatively skipped.
+    /// </param>
     /// <remarks>
     /// Multi-episode releases are not supported: if the candidate list contains more than one
     /// importable file for <paramref name="record"/>'s <see cref="QueueRecord.DownloadId"/>, this
     /// method logs and returns <see langword="false"/> without issuing the import command.
+    /// When <paramref name="episodeHasFile"/> is <see langword="true"/>, the import additionally
+    /// requires the existing file's quality cutoff to be not met AND the candidate's custom-format
+    /// score to be strictly greater than the existing file's - otherwise it is skipped as not a
+    /// genuine upgrade.
     /// </remarks>
     /// <returns><see langword="true"/> if the import command was issued; otherwise <see langword="false"/>.</returns>
-    protected async Task<bool> TryManualImportAsync(ArrInstance arrInstance, QueueRecord record)
+    protected async Task<bool> TryManualImportAsync(ArrInstance arrInstance, QueueRecord record, bool episodeHasFile = false, long? episodeFileId = null)
     {
         UriBuilder candidateListUriBuilder = new(arrInstance.Url);
         candidateListUriBuilder.Path = $"{candidateListUriBuilder.Path.TrimEnd('/')}/api/v3/manualimport";
@@ -703,6 +719,16 @@ public class SonarrClient : ArrClient, ISonarrClient
             return false;
         }
 
+        if (episodeHasFile)
+        {
+            bool isGenuineUpgrade = await IsGenuineUpgradeAsync(arrInstance, record, candidate, episodeFileId);
+
+            if (!isGenuineUpgrade)
+            {
+                return false;
+            }
+        }
+
         SonarrManualImportCommand command = new()
         {
             Files =
@@ -738,6 +764,86 @@ public class SonarrClient : ArrClient, ISonarrClient
         _logger.LogInformation(
             "manual import triggered | {url} | {downloadId} | {title}",
             arrInstance.Url,
+            record.DownloadId,
+            record.Title
+        );
+
+        return true;
+    }
+
+    /// <summary>
+    /// Decides whether a manual import into an episode that already has a file
+    /// (<see cref="QueueRecord.EpisodeHasFile"/>) is a genuine quality upgrade, using Sonarr's own
+    /// data rather than inventing quality-comparison logic here.
+    /// </summary>
+    /// <remarks>
+    /// A genuine upgrade requires BOTH: the existing file's quality cutoff is not met
+    /// (<see cref="ArrEpisodeFile.QualityCutoffNotMet"/>), AND the candidate's custom-format score
+    /// is strictly greater than the existing file's (<see cref="ArrEpisodeFile.CustomFormatScore"/>
+    /// vs <see cref="SonarrManualImportCandidate.CustomFormatScore"/>). If <paramref name="episodeFileId"/>
+    /// is <see langword="null"/>, or no matching <see cref="ArrEpisodeFile"/> is found, the check
+    /// cannot be evaluated and this conservatively returns <see langword="false"/>.
+    /// </remarks>
+    private async Task<bool> IsGenuineUpgradeAsync(
+        ArrInstance arrInstance,
+        QueueRecord record,
+        SonarrManualImportCandidate candidate,
+        long? episodeFileId)
+    {
+        if (episodeFileId is null)
+        {
+            _logger.LogInformation(
+                "skip manual import | episode already has a file but its file id is unknown, so upgrade eligibility could not be evaluated | {downloadId} | {title}",
+                record.DownloadId,
+                record.Title
+            );
+
+            return false;
+        }
+
+        List<ArrEpisodeFile> episodeFiles = await GetEpisodeFilesAsync(arrInstance, candidate.Series!.Id);
+        ArrEpisodeFile? existingFile = episodeFiles.FirstOrDefault(x => x.Id == episodeFileId.Value);
+
+        if (existingFile is null)
+        {
+            _logger.LogInformation(
+                "skip manual import | episode already has a file but its episode file data could not be found, so upgrade eligibility could not be evaluated | {episodeFileId} | {downloadId} | {title}",
+                episodeFileId.Value,
+                record.DownloadId,
+                record.Title
+            );
+
+            return false;
+        }
+
+        if (!existingFile.QualityCutoffNotMet)
+        {
+            _logger.LogInformation(
+                "skip manual import | episode already has a file and its quality cutoff is already met, so the import was not performed | {downloadId} | {title}",
+                record.DownloadId,
+                record.Title
+            );
+
+            return false;
+        }
+
+        if (candidate.CustomFormatScore <= existingFile.CustomFormatScore)
+        {
+            _logger.LogInformation(
+                "skip manual import | episode already has a file and the candidate is not a custom-format score upgrade | existingScore={existingScore} candidateScore={candidateScore} | {downloadId} | {title}",
+                existingFile.CustomFormatScore,
+                candidate.CustomFormatScore,
+                record.DownloadId,
+                record.Title
+            );
+
+            return false;
+        }
+
+        _logger.LogInformation(
+            "manual import proceeding despite existing file | genuine upgrade | existingScore={existingScore} candidateScore={candidateScore} | {downloadId} | {title}",
+            existingFile.CustomFormatScore,
+            candidate.CustomFormatScore,
             record.DownloadId,
             record.Title
         );

@@ -624,6 +624,125 @@ public class SonarrClientTests
         _httpMessageHandler.CapturedRequests.ShouldNotContain(r => r.Method == HttpMethod.Post);
     }
 
+    private void RouteManualImportCandidateAndEpisodeFiles(int candidateCustomFormatScore, long episodeFileId, bool qualityCutoffNotMet, int existingCustomFormatScore)
+    {
+        var candidate = new SonarrManualImportCandidate
+        {
+            Path = "/downloads/show/episode.mkv",
+            FolderName = "show",
+            Series = new SonarrManualImportCandidateSeries { Id = 1781 },
+            Episodes = [new SonarrManualImportEpisode { Id = 91707, HasFile = true }],
+            Quality = EmptyJsonObject(),
+            Languages = EmptyJsonObject(),
+            ReleaseType = "singleEpisode",
+            DownloadId = "4",
+            CustomFormatScore = candidateCustomFormatScore,
+        };
+
+        _httpMessageHandler.SetupResponse((req, _) =>
+        {
+            if (req.Method == HttpMethod.Get && req.RequestUri!.AbsolutePath.EndsWith("/manualimport"))
+            {
+                return Task.FromResult(JsonResponse(new[] { candidate }));
+            }
+
+            if (req.Method == HttpMethod.Get && req.RequestUri!.AbsolutePath.EndsWith("/episodefile"))
+            {
+                return Task.FromResult(JsonResponse(new[]
+                {
+                    new ArrEpisodeFile
+                    {
+                        Id = episodeFileId,
+                        QualityCutoffNotMet = qualityCutoffNotMet,
+                        CustomFormatScore = existingCustomFormatScore,
+                    },
+                }));
+            }
+
+            if (req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath.EndsWith("/command"))
+            {
+                return Task.FromResult(JsonResponse(new { id = 1L }));
+            }
+
+            return Task.FromResult(JsonNullResponse());
+        });
+    }
+
+    [Fact]
+    public async Task TryManualImportAsync_EpisodeHasFileAndCutoffMet_SkipsWithoutIssuingCommand()
+    {
+        // Arrange — cutoff already met, so not eligible for upgrade regardless of score.
+        var record = BuildRecord(4);
+        RouteManualImportCandidateAndEpisodeFiles(candidateCustomFormatScore: 100, episodeFileId: 55, qualityCutoffNotMet: false, existingCustomFormatScore: 10);
+
+        // Act
+        bool result = await TryManualImportAsyncPublic(_client, _arrInstance, record, episodeHasFile: true, episodeFileId: 55);
+
+        // Assert
+        result.ShouldBeFalse();
+        _httpMessageHandler.CapturedRequests.ShouldNotContain(r => r.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task TryManualImportAsync_EpisodeHasFileCutoffNotMetButNotHigherScore_SkipsWithoutIssuingCommand()
+    {
+        // Arrange — cutoff not met, but candidate's score does not exceed the existing file's.
+        var record = BuildRecord(4);
+        RouteManualImportCandidateAndEpisodeFiles(candidateCustomFormatScore: 10, episodeFileId: 55, qualityCutoffNotMet: true, existingCustomFormatScore: 10);
+
+        // Act
+        bool result = await TryManualImportAsyncPublic(_client, _arrInstance, record, episodeHasFile: true, episodeFileId: 55);
+
+        // Assert
+        result.ShouldBeFalse();
+        _httpMessageHandler.CapturedRequests.ShouldNotContain(r => r.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task TryManualImportAsync_EpisodeHasFileCutoffNotMetAndHigherScore_IssuesManualImportCommand()
+    {
+        // Arrange — genuine upgrade: cutoff not met AND candidate's score is strictly higher.
+        var record = BuildRecord(4);
+        RouteManualImportCandidateAndEpisodeFiles(candidateCustomFormatScore: 50, episodeFileId: 55, qualityCutoffNotMet: true, existingCustomFormatScore: 10);
+
+        // Act
+        bool result = await TryManualImportAsyncPublic(_client, _arrInstance, record, episodeHasFile: true, episodeFileId: 55);
+
+        // Assert
+        result.ShouldBeTrue();
+        _httpMessageHandler.CapturedRequests.ShouldContain(r => r.Method == HttpMethod.Post && r.RequestUri!.AbsolutePath.EndsWith("/command"));
+    }
+
+    [Fact]
+    public async Task TryManualImportAsync_EpisodeHasFileButEpisodeFileIdNull_SkipsWithoutIssuingCommand()
+    {
+        // Arrange — episode lookup couldn't resolve a file id, so upgrade eligibility is unknown.
+        var record = BuildRecord(4);
+        RouteManualImportCandidateAndEpisodeFiles(candidateCustomFormatScore: 50, episodeFileId: 55, qualityCutoffNotMet: true, existingCustomFormatScore: 10);
+
+        // Act
+        bool result = await TryManualImportAsyncPublic(_client, _arrInstance, record, episodeHasFile: true, episodeFileId: null);
+
+        // Assert
+        result.ShouldBeFalse();
+        _httpMessageHandler.CapturedRequests.ShouldNotContain(r => r.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task TryManualImportAsync_EpisodeHasFileButNoMatchingEpisodeFile_SkipsWithoutIssuingCommand()
+    {
+        // Arrange — GetEpisodeFilesAsync returns files, but none match the episode's file id.
+        var record = BuildRecord(4);
+        RouteManualImportCandidateAndEpisodeFiles(candidateCustomFormatScore: 50, episodeFileId: 55, qualityCutoffNotMet: true, existingCustomFormatScore: 10);
+
+        // Act — a file id that doesn't match the one seeded in the /episodefile response.
+        bool result = await TryManualImportAsyncPublic(_client, _arrInstance, record, episodeHasFile: true, episodeFileId: 999);
+
+        // Assert
+        result.ShouldBeFalse();
+        _httpMessageHandler.CapturedRequests.ShouldNotContain(r => r.Method == HttpMethod.Post);
+    }
+
     #endregion
 
     #region TryAiAssistedImportAsync
@@ -1615,11 +1734,16 @@ public class SonarrClientTests
     /// AiImportOutcome.Skipped regardless of setup. Reflection keeps <c>_client</c>'s runtime type
     /// exactly <see cref="SonarrClient"/> so the guard behaves the same as it does in production.
     /// </summary>
-    private static Task<bool> TryManualImportAsyncPublic(SonarrClient client, ArrInstance arrInstance, QueueRecord record)
+    private static Task<bool> TryManualImportAsyncPublic(
+        SonarrClient client,
+        ArrInstance arrInstance,
+        QueueRecord record,
+        bool episodeHasFile = false,
+        long? episodeFileId = null)
     {
         var method = typeof(SonarrClient).GetMethod(
             "TryManualImportAsync",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
-        return (Task<bool>)method.Invoke(client, [arrInstance, record])!;
+        return (Task<bool>)method.Invoke(client, [arrInstance, record, episodeHasFile, episodeFileId])!;
     }
 }

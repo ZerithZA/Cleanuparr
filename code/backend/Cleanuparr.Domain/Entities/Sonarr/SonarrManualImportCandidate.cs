@@ -69,4 +69,12 @@ public sealed record SonarrManualImportCandidate
     /// The reasons Sonarr would reject this candidate from automatic import, if any.
     /// </summary>
     public List<JsonElement>? Rejections { get; init; }
+
+    /// <summary>
+    /// The candidate release's custom-format score, as returned by <c>GET /api/v3/manualimport</c>'s
+    /// top-level <c>customFormatScore</c> field. Compared against the existing file's custom-format
+    /// score to decide whether an import into an episode that already has a file is a genuine
+    /// upgrade.
+    /// </summary>
+    public int CustomFormatScore { get; init; }
 }
