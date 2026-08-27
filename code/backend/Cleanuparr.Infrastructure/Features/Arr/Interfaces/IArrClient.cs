@@ -10,7 +10,23 @@ public interface IArrClient
 {
     Task<QueueListResponse> GetQueueItemsAsync(ArrInstance arrInstance, int page);
 
-    Task<bool> ShouldRemoveFromQueue(InstanceType instanceType, QueueRecord record, bool isPrivateDownload, short arrMaxStrikes);
+    /// <summary>
+    /// Determines whether a queue record should be removed from the *arr queue (and struck)
+    /// due to a failed import.
+    /// </summary>
+    /// <param name="instanceType">The type of the *arr instance hosting the queue item.</param>
+    /// <param name="record">The queue record to evaluate.</param>
+    /// <param name="isPrivateDownload">Whether the download is from a private tracker.</param>
+    /// <param name="arrMaxStrikes">The configured max strikes for this *arr instance.</param>
+    /// <param name="bypassFailedImportPatternFilter">
+    /// When <c>true</c>, the caller has already determined (via AI-assisted import) that this
+    /// record cannot be resolved, so the user-configured failed-import pattern
+    /// inclusion/exclusion check is bypassed entirely. The record is still subject to the same
+    /// failed-import candidate state check (warning + importBlocked/importPending/
+    /// importFailed, etc.) and the same strike-counting/max-strikes mechanics - only the
+    /// pattern-based gate is skipped. Defaults to <c>false</c>, preserving existing behavior.
+    /// </param>
+    Task<bool> ShouldRemoveFromQueue(InstanceType instanceType, QueueRecord record, bool isPrivateDownload, short arrMaxStrikes, bool bypassFailedImportPatternFilter = false);
 
     /// <summary>
     /// Attempts an AI-assisted manual import for a queue record that failed automatic import.

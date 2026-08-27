@@ -4,6 +4,7 @@ using Cleanuparr.Domain.Enums;
 using Cleanuparr.Infrastructure.Features.Arr.Interfaces;
 using Cleanuparr.Infrastructure.Features.DownloadClient;
 using Cleanuparr.Infrastructure.Features.ItemStriker;
+using Cleanuparr.Infrastructure.Features.Ollama;
 using Cleanuparr.Infrastructure.Services.Interfaces;
 using Cleanuparr.Infrastructure.Tests.Features.Jobs.TestHelpers;
 using Cleanuparr.Persistence.Models.Configuration.Arr;
@@ -165,7 +166,7 @@ public class QueueCleanerIntegrationTests : IDisposable
         _fixture.ArrClient.IsRecordValid(Arg.Any<QueueRecord>()).Returns(true);
         _fixture.ArrClient.HasContentId(Arg.Any<QueueRecord>()).Returns(true);
         _fixture.ArrClient.ShouldRemoveFromQueue(
-            Arg.Any<InstanceType>(), Arg.Any<QueueRecord>(), Arg.Any<bool>(), Arg.Any<short>())
+            Arg.Any<InstanceType>(), Arg.Any<QueueRecord>(), Arg.Any<bool>(), Arg.Any<short>(), Arg.Any<bool>())
             .Returns(true);
 
         var mockDownloadService = _fixture.CreateMockDownloadService();
@@ -366,7 +367,7 @@ public class QueueCleanerIntegrationTests : IDisposable
         _fixture.ArrClient.IsRecordValid(Arg.Any<QueueRecord>()).Returns(true);
         _fixture.ArrClient.HasContentId(Arg.Any<QueueRecord>()).Returns(true);
         _fixture.ArrClient.ShouldRemoveFromQueue(
-            Arg.Any<InstanceType>(), Arg.Any<QueueRecord>(), Arg.Any<bool>(), Arg.Any<short>()
+            Arg.Any<InstanceType>(), Arg.Any<QueueRecord>(), Arg.Any<bool>(), Arg.Any<short>(), Arg.Any<bool>()
         ).Returns(false);
 
         var sut = CreateSut();
@@ -394,7 +395,7 @@ public class QueueCleanerIntegrationTests : IDisposable
         _fixture.ArrClient.IsRecordValid(Arg.Any<QueueRecord>()).Returns(true);
         _fixture.ArrClient.HasContentId(Arg.Any<QueueRecord>()).Returns(true);
         _fixture.ArrClient.ShouldRemoveFromQueue(
-            Arg.Any<InstanceType>(), Arg.Any<QueueRecord>(), Arg.Any<bool>(), Arg.Any<short>()
+            Arg.Any<InstanceType>(), Arg.Any<QueueRecord>(), Arg.Any<bool>(), Arg.Any<short>(), Arg.Any<bool>()
         ).Returns(false);
 
         var sut = CreateSut();
@@ -406,7 +407,7 @@ public class QueueCleanerIntegrationTests : IDisposable
         // the point under test is that ShouldRemoveFromQueue still runs with the same arguments
         // regardless of whether AiImport is enabled (control-flow equivalence, AC-2/AC-43).
         await _fixture.ArrClient.Received(1).ShouldRemoveFromQueue(
-            InstanceType.Sonarr, Arg.Is<QueueRecord>(r => r.DownloadId == record.DownloadId), false, Arg.Any<short>());
+            InstanceType.Sonarr, Arg.Is<QueueRecord>(r => r.DownloadId == record.DownloadId), false, Arg.Any<short>(), false);
     }
 
     // AC-4b: the primary AC of the whole feature. Using the real fixture (already
@@ -440,6 +441,37 @@ public class QueueCleanerIntegrationTests : IDisposable
 
         // Assert — no removal request was published (no strike authority exercised by the AI path).
         _fixture.GetCapturedRemoveRequests().ShouldBeEmpty();
+    }
+
+    // FallThrough means AI-import made its own definitive "cannot be resolved" determination.
+    // ShouldRemoveFromQueue must then be called with the user's pattern filter bypassed.
+    [Fact]
+    public async Task RealFixture_AiImportOutcomeFallThrough_BypassesFailedImportPatternFilter()
+    {
+        // Arrange
+        TestDataContextFactory.AddSonarrInstance(_fixture.DataContext);
+        TestDataContextFactory.AddDownloadClient(_fixture.DataContext);
+        EnableAiImport();
+
+        QueueRecord record = LoadRealFixtureRecord();
+        _fixture.SetupArrQueueIterator(record);
+        _fixture.ArrClient.IsRecordValid(Arg.Any<QueueRecord>()).Returns(true);
+        _fixture.ArrClient.HasContentId(Arg.Any<QueueRecord>()).Returns(true);
+        _fixture.ArrClient.TryAiAssistedImportAsync(
+            Arg.Any<ArrInstance>(), Arg.Any<QueueRecord>(), Arg.Any<bool>()
+        ).Returns(AiImportOutcome.FallThrough);
+        _fixture.ArrClient.ShouldRemoveFromQueue(
+            Arg.Any<InstanceType>(), Arg.Any<QueueRecord>(), Arg.Any<bool>(), Arg.Any<short>(), Arg.Any<bool>()
+        ).Returns(false);
+
+        var sut = CreateSut();
+
+        // Act
+        await sut.ExecuteAsync();
+
+        // Assert
+        await _fixture.ArrClient.Received(1).ShouldRemoveFromQueue(
+            InstanceType.Sonarr, Arg.Is<QueueRecord>(r => r.DownloadId == record.DownloadId), Arg.Any<bool>(), Arg.Any<short>(), true);
     }
 
     // AC-5: a record with a message starting "Unable to import automatically" (the existing
@@ -484,7 +516,7 @@ public class QueueCleanerIntegrationTests : IDisposable
 
         // Assert
         await _fixture.ArrClient.Received(1).ShouldRemoveFromQueue(
-            InstanceType.Sonarr, Arg.Is<QueueRecord>(r => r.DownloadId == record.DownloadId), Arg.Any<bool>(), Arg.Any<short>());
+            InstanceType.Sonarr, Arg.Is<QueueRecord>(r => r.DownloadId == record.DownloadId), Arg.Any<bool>(), Arg.Any<short>(), false);
     }
 
     // AC-6: a record with trackedDownloadState "importPending" and an unrelated status message
@@ -508,7 +540,7 @@ public class QueueCleanerIntegrationTests : IDisposable
         _fixture.ArrClient.IsRecordValid(Arg.Any<QueueRecord>()).Returns(true);
         _fixture.ArrClient.HasContentId(Arg.Any<QueueRecord>()).Returns(true);
         _fixture.ArrClient.ShouldRemoveFromQueue(
-            Arg.Any<InstanceType>(), Arg.Any<QueueRecord>(), Arg.Any<bool>(), Arg.Any<short>()
+            Arg.Any<InstanceType>(), Arg.Any<QueueRecord>(), Arg.Any<bool>(), Arg.Any<short>(), Arg.Any<bool>()
         ).Returns(false);
 
         var sut = CreateSut();
@@ -519,7 +551,7 @@ public class QueueCleanerIntegrationTests : IDisposable
         // Assert
         _fixture.GetCapturedRemoveRequests().ShouldBeEmpty();
         await _fixture.ArrClient.Received(1).ShouldRemoveFromQueue(
-            InstanceType.Sonarr, Arg.Is<QueueRecord>(r => r.DownloadId == record.DownloadId), false, Arg.Any<short>());
+            InstanceType.Sonarr, Arg.Is<QueueRecord>(r => r.DownloadId == record.DownloadId), false, Arg.Any<short>(), false);
     }
 
     #endregion

@@ -1337,6 +1337,27 @@ public class SonarrClientTests
         _logger.ReceivedLogContaining(LogLevel.Warning, "skip budget exhausted", count: 1);
     }
 
+    // Regression test: the skip counter and its "budget exhausted" warning flag must use an
+    // ABSOLUTE expiration, not a sliding one. Once the budget is exhausted, every subsequent tick
+    // reads both entries (to re-check whether the budget is still exhausted) before the
+    // exhaustion branch returns - with a sliding expiration, that very read would renew the
+    // window on every tick and the entries would never actually expire, permanently stalling the
+    // download regardless of how long the app keeps running. Asserted directly against the
+    // shared options object (rather than via a time-advancing cache test, which this test project
+    // has no deterministic clock/TimeProvider infrastructure for) since it is the exact property
+    // that must never regress back to sliding.
+    [Fact]
+    public void AiImportSkipCacheEntryOptions_UsesAbsoluteNotSlidingExpiration()
+    {
+        var field = typeof(SonarrClient).GetField(
+            "AiImportSkipCacheEntryOptions",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        var options = (MemoryCacheEntryOptions)field.GetValue(null)!;
+
+        options.AbsoluteExpirationRelativeToNow.ShouldNotBeNull();
+        options.SlidingExpiration.ShouldBeNull();
+    }
+
     private void RouteManualImportAndSeries()
     {
         var candidate = new SonarrManualImportCandidate

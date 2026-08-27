@@ -684,6 +684,83 @@ public class ArrClientTests
         result.ShouldBeTrue();
     }
 
+    [Fact]
+    public async Task ShouldRemoveFromQueue_BypassPatternFilterTrue_IncludePatternNotMatched_StillStrikes()
+    {
+        // Arrange — include-mode with a non-matching pattern would normally skip, but the caller
+        // has already determined (via AI-assisted import) that this record cannot be resolved, so
+        // the pattern gate should be bypassed while IsFailedImportCandidate is still satisfied.
+        SetQueueCleanerConfig(new QueueCleanerConfig
+        {
+            FailedImport = new FailedImportConfig
+            {
+                MaxStrikes = 3,
+                PatternMode = PatternMode.Include,
+                Patterns = new List<string> { "specific reason" },
+            },
+        });
+        var record = BuildRecord(1, trackedStatus: "warning", trackedState: "importBlocked",
+            statusMessages: new List<TrackedDownloadStatusMessage>
+            {
+                new() { Title = "failed", Messages = ["Found matching series via grab history, but release was matched to series by ID"] },
+            });
+        _striker.StrikeAndCheckLimit(record.DownloadId, record.Title, (ushort)3, StrikeType.FailedImport)
+            .Returns(true);
+
+        // Act
+        var result = await _client.ShouldRemoveFromQueue(InstanceType.Sonarr, record, isPrivateDownload: false, arrMaxStrikes: -1, bypassFailedImportPatternFilter: true);
+
+        // Assert
+        result.ShouldBeTrue();
+        await _striker.Received(1).StrikeAndCheckLimit(record.DownloadId, record.Title, (ushort)3, StrikeType.FailedImport);
+    }
+
+    [Fact]
+    public async Task ShouldRemoveFromQueue_BypassPatternFilterFalseOrOmitted_IncludePatternNotMatched_DoesNotStrike()
+    {
+        // Arrange — regression check: default/false bypass must preserve existing pattern-gated behavior
+        SetQueueCleanerConfig(new QueueCleanerConfig
+        {
+            FailedImport = new FailedImportConfig
+            {
+                MaxStrikes = 3,
+                PatternMode = PatternMode.Include,
+                Patterns = new List<string> { "specific reason" },
+            },
+        });
+        var record = BuildRecord(1, trackedStatus: "warning", trackedState: "importBlocked",
+            statusMessages: new List<TrackedDownloadStatusMessage>
+            {
+                new() { Title = "failed", Messages = ["Found matching series via grab history, but release was matched to series by ID"] },
+            });
+
+        // Act
+        var result = await _client.ShouldRemoveFromQueue(InstanceType.Sonarr, record, isPrivateDownload: false, arrMaxStrikes: -1);
+
+        // Assert
+        result.ShouldBeFalse();
+        await _striker.DidNotReceive().StrikeAndCheckLimit(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<ushort>(), Arg.Any<StrikeType>(), Arg.Any<long?>());
+    }
+
+    [Fact]
+    public async Task ShouldRemoveFromQueue_BypassPatternFilterTrue_NotFailedImportCandidate_ReturnsFalse()
+    {
+        // Arrange — bypassing the pattern gate must NOT bypass the IsFailedImportCandidate state
+        // check: record is "downloading" with no failed-import message, so it is not a candidate.
+        SetQueueCleanerConfig(new QueueCleanerConfig
+        {
+            FailedImport = new FailedImportConfig { MaxStrikes = 3, PatternMode = PatternMode.Exclude },
+        });
+        var record = BuildRecord(1, trackedStatus: "ok", trackedState: "downloading");
+
+        // Act
+        var result = await _client.ShouldRemoveFromQueue(InstanceType.Sonarr, record, isPrivateDownload: false, arrMaxStrikes: -1, bypassFailedImportPatternFilter: true);
+
+        // Assert
+        result.ShouldBeFalse();
+        await _striker.DidNotReceive().StrikeAndCheckLimit(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<ushort>(), Arg.Any<StrikeType>(), Arg.Any<long?>());
+    }
+
     #endregion
 
     #region IsFailedImportCandidate (AC-40)

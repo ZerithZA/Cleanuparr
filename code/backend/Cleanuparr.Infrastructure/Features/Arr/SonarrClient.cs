@@ -23,6 +23,20 @@ namespace Cleanuparr.Infrastructure.Features.Arr;
 
 public class SonarrClient : ArrClient, ISonarrClient
 {
+    /// <summary>
+    /// Cache options for the AI-import consecutive-skip counter and its associated
+    /// "budget exhausted" warning flag. Deliberately uses an ABSOLUTE expiration rather than
+    /// <see cref="Constants.DefaultCacheEntryOptions"/>'s sliding one: both entries are read on
+    /// every QueueCleaner cycle to check whether the skip budget is exhausted, and a sliding
+    /// expiration is renewed on every read - so a sliding-expiration counter would never actually
+    /// expire once exhausted, permanently stalling that download. An absolute window guarantees a
+    /// genuine cooldown regardless of how often it is polled.
+    /// </summary>
+    private static readonly MemoryCacheEntryOptions AiImportSkipCacheEntryOptions = new()
+    {
+        AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(10)
+    };
+
     private readonly IOllamaClient _ollamaClient;
     private readonly IAiImportBudget _aiImportBudget;
     private readonly IMemoryCache _cache;
@@ -473,7 +487,7 @@ public class SonarrClient : ArrClient, ISonarrClient
                     record.DownloadId,
                     record.Title
                 );
-                _cache.Set(skipBudgetWarnedKey, true, Constants.DefaultCacheEntryOptions);
+                _cache.Set(skipBudgetWarnedKey, true, AiImportSkipCacheEntryOptions);
             }
 
             return AiImportOutcome.Skipped;
@@ -633,7 +647,7 @@ public class SonarrClient : ArrClient, ISonarrClient
     private static readonly char[] NonTokenCharacters = " .-_()[]{}!,:;'\"".ToCharArray();
 
     private void RecordAiImportSkip(string skipCounterKey, int currentSkips) =>
-        _cache.Set(skipCounterKey, currentSkips + 1, Constants.DefaultCacheEntryOptions);
+        _cache.Set(skipCounterKey, currentSkips + 1, AiImportSkipCacheEntryOptions);
 
     private static string AiImportDecisionCacheKey(string downloadId, Uri instanceUrl) =>
         $"ai_import_{downloadId.ToLowerInvariant()}_{instanceUrl}";
