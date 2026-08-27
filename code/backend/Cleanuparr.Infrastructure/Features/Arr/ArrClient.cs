@@ -132,7 +132,17 @@ public abstract class ArrClient : IArrClient
                 ?.Any(message => message.StartsWith(targetMessagePrefix, StringComparison.InvariantCultureIgnoreCase)) is true
             ) is true;
 
-    public virtual async Task<bool> ShouldRemoveFromQueue(InstanceType instanceType, QueueRecord record, bool isPrivateDownload, short arrMaxStrikes)
+    /// <summary>
+    /// Determines whether a queue record should be removed from the *arr queue (and struck)
+    /// due to a failed import.
+    /// </summary>
+    /// <param name="bypassFailedImportPatternFilter">
+    /// When <c>true</c> (set by the caller after AI-assisted import already made its own
+    /// definitive "cannot be resolved" determination), the user-configured failed-import
+    /// pattern inclusion/exclusion check (<see cref="ShouldStrikeFailedImport"/>) is skipped
+    /// entirely - the record still must satisfy <see cref="IsFailedImportCandidate"/>.
+    /// </param>
+    public virtual async Task<bool> ShouldRemoveFromQueue(InstanceType instanceType, QueueRecord record, bool isPrivateDownload, short arrMaxStrikes, bool bypassFailedImportPatternFilter = false)
     {
         var queueCleanerConfig = ContextProvider.Get<QueueCleanerConfig>();
 
@@ -145,7 +155,7 @@ public abstract class ArrClient : IArrClient
 
         if (IsFailedImportCandidate(instanceType, record))
         {
-            if (!ShouldStrikeFailedImport(queueCleanerConfig, record))
+            if (!bypassFailedImportPatternFilter && !ShouldStrikeFailedImport(queueCleanerConfig, record))
             {
                 return false;
             }

@@ -371,7 +371,8 @@ public class QueueCleanerTests : IDisposable
             Arg.Any<InstanceType>(),
             Arg.Any<QueueRecord>(),
             Arg.Any<bool>(),
-            Arg.Any<short>()
+            Arg.Any<short>(),
+            Arg.Any<bool>()
         ).Returns(false);
 
         _fixture.ArrClientFactory
@@ -571,7 +572,8 @@ public class QueueCleanerTests : IDisposable
             Arg.Any<InstanceType>(),
             Arg.Any<QueueRecord>(),
             Arg.Any<bool>(),
-            Arg.Any<short>()
+            Arg.Any<short>(),
+            Arg.Any<bool>()
         ).Returns(false);
 
         _fixture.ArrClientFactory
@@ -635,7 +637,8 @@ public class QueueCleanerTests : IDisposable
             Arg.Any<InstanceType>(),
             Arg.Any<QueueRecord>(),
             Arg.Any<bool>(),
-            Arg.Any<short>()
+            Arg.Any<short>(),
+            Arg.Any<bool>()
         ).Returns(false);
 
         _fixture.ArrClientFactory
@@ -686,7 +689,8 @@ public class QueueCleanerTests : IDisposable
             InstanceType.Sonarr,
             queueRecord,
             false,
-            Arg.Any<short>()
+            Arg.Any<short>(),
+            false
         );
     }
 
@@ -704,7 +708,8 @@ public class QueueCleanerTests : IDisposable
             Arg.Any<InstanceType>(),
             Arg.Any<QueueRecord>(),
             Arg.Any<bool>(),
-            Arg.Any<short>()
+            Arg.Any<short>(),
+            Arg.Any<bool>()
         ).Returns(true);
 
         _fixture.ArrClientFactory
@@ -773,7 +778,8 @@ public class QueueCleanerTests : IDisposable
             Arg.Any<InstanceType>(),
             Arg.Any<QueueRecord>(),
             Arg.Any<bool>(),
-            Arg.Any<short>()
+            Arg.Any<short>(),
+            Arg.Any<bool>()
         ).Returns(false);
 
         _fixture.ArrClientFactory
@@ -819,11 +825,13 @@ public class QueueCleanerTests : IDisposable
         // Assert - AC-43: control-flow equivalence. The existing failed-import check must
         // still run exactly as before, since this mock leaves TryAiAssistedImportAsync
         // unstubbed and it auto-returns AiImportOutcome.Skipped (the enum's zero member).
+        // The pattern filter bypass must be false for a Skipped outcome.
         await mockArrClient.Received(1).ShouldRemoveFromQueue(
             InstanceType.Sonarr,
             queueRecord,
             false,
-            Arg.Any<short>()
+            Arg.Any<short>(),
+            false
         );
     }
 
@@ -880,7 +888,8 @@ public class QueueCleanerTests : IDisposable
             Arg.Any<InstanceType>(),
             Arg.Any<QueueRecord>(),
             Arg.Any<bool>(),
-            Arg.Any<short>()
+            Arg.Any<short>(),
+            Arg.Any<bool>()
         );
         await _fixture.MessageBus.DidNotReceive().Publish(
             Arg.Any<QueueItemRemoveRequest>(),
@@ -891,9 +900,10 @@ public class QueueCleanerTests : IDisposable
     [Fact]
     public async Task ProcessInstanceAsync_WhenAiImportOutcomeIsFallThrough_RecordAccruesNoStrikesAndIsNotRemoved()
     {
-        // Arrange - AC-47: FallThrough is a deliberate non-change. The AI path never converts
-        // a classification into strike or delete authority; the record must remain stuck in
-        // the queue exactly as it would on main with the feature entirely absent.
+        // Arrange - FallThrough means AI-import made its own definitive "cannot be resolved"
+        // determination. The record still goes through the normal failed-import check, but the
+        // user's pattern filter is bypassed for it. This test stubs ShouldRemoveFromQueue to
+        // return false regardless, so no strike/removal request is published for this tick.
         TestDataContextFactory.AddSonarrInstance(_fixture.DataContext);
         TestDataContextFactory.AddDownloadClient(_fixture.DataContext);
 
@@ -909,7 +919,8 @@ public class QueueCleanerTests : IDisposable
             Arg.Any<InstanceType>(),
             Arg.Any<QueueRecord>(),
             Arg.Any<bool>(),
-            Arg.Any<short>()
+            Arg.Any<short>(),
+            Arg.Any<bool>()
         ).Returns(false);
 
         _fixture.ArrClientFactory
@@ -943,13 +954,15 @@ public class QueueCleanerTests : IDisposable
         // Act
         await sut.ExecuteAsync();
 
-        // Assert - the existing failed-import check still runs and, per this test's stub,
-        // decides not to remove the record. No strike/removal request is published.
+        // Assert - the existing failed-import check still runs, with the user's pattern filter
+        // bypassed since AI-import already made its own resolution determination. Per this
+        // test's stub, ShouldRemoveFromQueue decides not to remove the record either way.
         await mockArrClient.Received(1).ShouldRemoveFromQueue(
             InstanceType.Sonarr,
             queueRecord,
             false,
-            Arg.Any<short>()
+            Arg.Any<short>(),
+            true
         );
         await _fixture.MessageBus.DidNotReceive().Publish(
             Arg.Any<QueueItemRemoveRequest>(),
@@ -1054,7 +1067,8 @@ public class QueueCleanerTests : IDisposable
             Arg.Any<InstanceType>(),
             Arg.Any<QueueRecord>(),
             Arg.Any<bool>(),
-            Arg.Any<short>()
+            Arg.Any<short>(),
+            Arg.Any<bool>()
         ).Returns(false);
 
         _fixture.ArrClientFactory
@@ -1133,7 +1147,8 @@ public class QueueCleanerTests : IDisposable
             Arg.Any<InstanceType>(),
             Arg.Any<QueueRecord>(),
             Arg.Any<bool>(),
-            Arg.Any<short>()
+            Arg.Any<short>(),
+            Arg.Any<bool>()
         ).Returns(false);
 
         _fixture.ArrClientFactory
@@ -1739,7 +1754,8 @@ public class QueueCleanerTests : IDisposable
             Arg.Any<InstanceType>(),
             Arg.Any<QueueRecord>(),
             Arg.Any<bool>(),
-            Arg.Any<short>()
+            Arg.Any<short>(),
+            Arg.Any<bool>()
         ).Returns(true);
 
         _fixture.ArrClientFactory

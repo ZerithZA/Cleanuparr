@@ -261,8 +261,11 @@ public sealed class QueueCleaner : GenericHandler
                 // AI-assisted import: attempt to recover a record stuck due to a series-by-ID
                 // grab-history mismatch before it is evaluated for strikes/removal. Imported
                 // records are handled by Sonarr's own import completion and must not also be
-                // struck this tick; FallThrough/Skipped fall through to the existing failed
-                // import check unchanged.
+                // struck this tick. Skipped falls through to the existing failed import check
+                // unchanged (the user's configured patterns still gate it). FallThrough also
+                // falls through to the failed import check, but bypasses the user's pattern
+                // filter: AI-import already made its own definitive "cannot be resolved"
+                // determination, which the user's pattern list was never meant to cover.
                 AiImportOutcome aiImportOutcome = await arrClient
                     .TryAiAssistedImportAsync(instance, record, downloadCheckResult.IsPrivate);
 
@@ -274,7 +277,12 @@ public sealed class QueueCleaner : GenericHandler
 
                 // Failed import check
                 bool shouldRemoveFromArr = await arrClient
-                    .ShouldRemoveFromQueue(instance.ArrConfig.Type, record, downloadCheckResult.IsPrivate, instance.ArrConfig.FailedImportMaxStrikes);
+                    .ShouldRemoveFromQueue(
+                        instance.ArrConfig.Type,
+                        record,
+                        downloadCheckResult.IsPrivate,
+                        instance.ArrConfig.FailedImportMaxStrikes,
+                        bypassFailedImportPatternFilter: aiImportOutcome is AiImportOutcome.FallThrough);
 
                 if (shouldRemoveFromArr)
                 {
